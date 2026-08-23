@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environment
+.venv/
+
+# Runtime data & logs (generated, not source)
+data/
+logs/
+*.log
+
+# Large binaries that must be downloaded by hand
+ffmpeg.exe
+
+# Archives / packaging
+*.zip
+*.7z
+*.rar
+
+# Office / binary docs (kept out of VCS; see PRD.md as the canonical doc)
+*.docx
+
+# Environment variables (defensive)
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>天气追踪边缘节点</title>
+<style>
+    :root {
+        --bg: #F3F6FA;
+        --panel: #FFFFFF;
+        --panel2: #F8FAFD;
+        --line: #E3E9F1;
+        --text: #1B2735;
+        --muted: #5B6B82;
+        --dim: #93A1B5;
+        --accent: #0F9BA8;
+        --accent-dim: rgba(15, 155, 168, 0.12);
+        --ok: #0E9F6E;
+        --fail: #E05252;
+        --missing: #D97706;
+        --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+        --sans: "Segoe UI Variable Display", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { zoom: 1.2; }
+    body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        min-height: 100vh;
+        padding: 12px;
+        overflow-x: hidden;
+    }
+    .wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+
+    /* 顶部通栏 */
+    .masthead {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 10px 14px;
+        background: var(--panel);
+        border: 1px solid var(--line); border-radius: 10px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-mark {
+        width: 32px; height: 32px; flex: 0 0 auto;
+        border: 1px solid rgba(15, 155, 168, 0.5);
+        border-radius: 8px;
+        display: grid; place-items: center;
+        background: var(--accent-dim);
+        color: var(--accent);
+    }
+    .brand h1 { font-size: 16px; font-weight: 650; letter-spacing: 0.02em; }
+    .brand p { font-size: 10px; color: var(--dim); letter-spacing: 0.2em; text-transform: uppercase; margin-top: 2px; }
+    .mast-right { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+    .clock { text-align: right; }
+    .clock .label { font-size: 9px; color: var(--dim); letter-spacing: 0.16em; }
+    .clock .value { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+    .node-state {
+        display: inline-flex; align-items: center; gap: 7px;
+        font-size: 11px; color: var(--muted);
+        border: 1px solid var(--line); border-radius: 999px;
+        padding: 4px 10px; background: var(--panel2);
+    }
+    .node-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+    .node-state.running .dot { animation: pulse 1.8s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    /* 面板通用 */
+    .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    .panel > .head {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel2);
+    }
+    .panel > .head h2 { font-size: 12px; font-weight: 650; letter-spacing: 0.06em; }
+    .panel > .head .sub { font-size: 10px; color: var(--dim); }
+    .panel > .body { padding: 12px; }
+
+    /* 合成任务（横贯顶部） */
+    .synth-row1 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .synth-row1 select { width: 220px; }
+    .span-row { display: inline-grid; grid-template-columns: repeat(5, auto); gap: 5px; }
+    .span-btn {
+        border: 1px solid var(--line);
+        background: var(--panel2);
+        color: var(--muted);
+        border-radius: 7px;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-family: var(--mono);
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .span-btn:hover { border-color: var(--accent); color: var(--text); }
+    .span-btn.active {
+        border-color: var(--accent);
+        color: var(--accent);
+        background: var(--accent-dim);
+        font-weight: 600;
+    }
+    .go-btn {
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #FFFFFF;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        border-radius: 8px;
+        padding: 7px 22px;
+        cursor: pointer;
+        transition: filter 0.15s;
+    }
+    .go-btn:hover { filter: brightness(1.08); }
+    .go-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .status-box {
+        display: inline-flex; align-items: center; gap: 7px;
+        padding: 7px 11px; border-radius: 7px; font-size: 11px;
+        border: 1px solid var(--line); background: var(--panel2); color: var(--muted);
+        min-width: 220px;
+    }
+    .status-box .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); }
+    .status-box.ok { color: var(--ok); border-color: rgba(14, 159, 110, 0.35); }
+    .status-box.ok .dot { background: var(--ok); }
+    .status-box.warn { color: var(--missing); border-color: rgba(217, 119, 6, 0.35); }
+    .status-box.warn .dot { background: var(--missing); animation: pulse 1.2s ease-in-out infinite; }
+    .status-box.err { color: var(--fail); border-color: rgba(224, 82, 82, 0.35); }
+    .status-box.err .dot { background: var(--fail); }
+
+    select {
+        background: var(--panel2);
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 7px;
+        padding: 7px 9px;
+        font-size: 12px;
+        font-family: var(--sans);
+        outline: none;
+        transition: border-color 0.15s;
+    }
+    select:focus-visible { border-color: var(--accent); }
+    select option { background: var(--panel); }
+
+    /* 时间轴 */
+    .tl-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; }
+    .tl-head .label { font-size: 10px; color: var(--muted); letter-spacing: 0.08em; margin-right: 2px; }
+    .tl-nav-btn {
+        border: 1px solid var(--line); background: var(--panel2); color: var(--muted);
+        border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+    }
+    .tl-nav-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+    .tl-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .tl-date { font-family: var(--mono); font-size: 12px; color: var(--text); flex: 1; text-align: center; }
+    .tl-clear {
+        border: 1px solid var(--line); background: var(--panel2); color: var(--missing);
+        border-radius: 7px; padding: 4px 8px; font-size: 11px; cursor: pointer;
+    }
+    .tl-clear:hover { border-color: var(--missing); }
+    .tl-scroll { overflow-x: auto; padding-bottom: 4px; }
+    .timeline {
+        display: grid;
+        grid-template-columns: repeat(48, minmax(13px, 1fr));
+        gap: 2px;
+        min-width: 700px;
+    }
+    .tl-cell {
+        height: 28px;
+        border-radius: 3px;
+        background: var(--panel2);
+        border: 1px solid var(--line);
+        cursor: default;
+        position: relative;
+    }
+    .tl-cell.has { background: #D9EEF1; border-color: #BFE3E7; }
+    .tl-cell.avail { cursor: pointer; border-color: var(--line); }
+    .tl-cell.avail:not(.selected):not(.covered):hover { border-color: var(--accent); background: var(--accent-dim); }
+    .tl-cell.covered { background: rgba(15, 155, 168, 0.55); border-color: var(--accent); }
+    .tl-cell.selected { background: var(--accent); border-color: #0B7C87; position: relative; }
+    .tl-cell.selected::after {
+        content: "";
+        position: absolute; left: 50%; top: 50%;
+        width: 6px; height: 6px; border-radius: 50%;
+        background: #FFFFFF;
+        transform: translate(-50%, -50%);
+    }
+    .tl-scale {
+        display: flex; justify-content: space-between;
+        font-size: 9px; color: var(--dim); font-family: var(--mono); margin-top: 4px;
+    }
+    .range-line {
+        display: flex; align-items: center; gap: 6px;
+        font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 8px;
+    }
+    .range-line b { color: var(--accent); font-weight: 600; }
+
+    /* 中部双栏 */
+    .mid { display: grid; grid-template-columns: 420px 1fr; gap: 10px; align-items: stretch; }
+    @media (max-width: 1000px) { .mid { grid-template-columns: 1fr; } }
+
+    /* KPI */
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+    .kpi { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+    .kpi .l { font-size: 9px; color: var(--dim); letter-spacing: 0.1em; }
+    .kpi .v { font-family: var(--mono); font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
+    .kpi.ok .v { color: var(--ok); }
+    .kpi.fail .v { color: var(--fail); }
+    .kpi.missing .v { color: var(--missing); }
+
+    /* 柱状图 */
+    .chart { display: flex; align-items: flex-end; gap: 3px; height: 118px; min-height: 118px; padding-top: 6px; }
+    #dlPanel { display: flex; flex-direction: column; }
+    #dlPanel > .body { flex: 1; }
+    #downloadBody { display: flex; flex-direction: column; }
+    #downloadChart { flex: 1; height: auto; }
+    .col { flex: 1; display: flex; flex-direction: column-reverse; justify-content: flex-start; height: 100%; position: relative; border-radius: 3px 3px 0 0; transition: background 0.12s; }
+    .col:hover { background: var(--accent-dim); }
+    .col .seg { width: 100%; }
+    .col .seg.ok { background: var(--ok); }
+    .col .seg.fail { background: var(--fail); }
+    .col .seg.missing { background: var(--missing); }
+    .col .tip {
+        position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%);
+        background: #1B2735; color: #FFFFFF; font-family: var(--mono); font-size: 10px;
+        padding: 4px 7px; border-radius: 5px; white-space: nowrap;
+        opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 8;
+    }
+    .col.tip-left .tip { left: 0; transform: none; }
+    .col.tip-right .tip { left: auto; right: 0; transform: none; }
+    .col:hover .tip { opacity: 1; }
+    .chart-axis { display: flex; justify-content: space-between; font-size: 9px; color: var(--dim); font-family: var(--mono); margin-top: 4px; }
+    .legend { display: flex; gap: 12px; margin-top: 7px; font-size: 10px; color: var(--muted); }
+    .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+    /* 落盘统计卡片 */
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .card .c-body { padding: 7px 9px 8px; }
+    .card .c-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card .c-num { font-family: var(--mono); font-size: 19px; font-weight: 600; margin: 2px 0 1px; font-variant-numeric: tabular-nums; }
+    .card .c-meta { font-size: 10px; color: var(--dim); font-family: var(--mono); }
+    .card .c-key { display: inline-block; font-family: var(--mono); font-size: 9px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; margin-top: 4px; color: var(--muted); }
+
+    /* 状态表 */
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+        text-align: left; font-size: 9px; font-weight: 600; letter-spacing: 0.12em;
+        color: var(--dim); text-transform: uppercase; padding: 7px 10px;
+        border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--panel2);
+    }
+    tbody td { padding: 7px 10px; border-bottom: 1px solid rgba(227, 233, 241, 0.8); font-size: 12px; vertical-align: middle; }
+    tbody tr { transition: background 0.12s; }
+    tbody tr:hover { background: var(--panel2); }
+    tbody tr:last-child td { border-bottom: none; }
+    td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    td .src-name { font-weight: 600; }
+    td .add { color: var(--ok); font-family: var(--mono); }
+    td .latest { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+    /* 覆盖带 */
+    .coverage { display: inline-flex; gap: 2px; align-items: center; padding: 3px 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; }
+    .coverage i { width: 5px; height: 12px; border-radius: 1px; background: #E5EAF2; transition: background 0.12s, transform 0.12s; display: block; }
+    .coverage i.hit { background: var(--accent); opacity: 0.72; }
+    .coverage i:hover { transform: scaleY(1.25); background: var(--missing); }
+    .coverage-label { font-size: 9px; color: var(--dim); margin-left: 6px; font-family: var(--mono); }
+
+    /* 日志终端 */
+    .terminal {
+        background: #F8FAFC;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        height: 210px;
+        overflow-y: auto;
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.6;
+        color: #334155;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .terminal::-webkit-scrollbar { width: 8px; }
+    .terminal::-webkit-scrollbar-track { background: #EEF2F7; }
+    .terminal::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+    .terminal .empty { color: #94A3B8; }
+
+    /* 视频产物 */
+    #videoList { max-height: 420px; overflow-y: auto; padding-right: 4px; }
+    #videoList::-webkit-scrollbar { width: 8px; }
+    #videoList::-webkit-scrollbar-track { background: #EEF2F7; }
+    #videoList::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+    .vgroup { margin-bottom: 12px; }
+    .vdate { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.06em; }
+    .vitem {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+        padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
+        margin-bottom: 6px; background: var(--panel2);
+    }
+    .vmain { flex: 1; min-width: 220px; }
+    .vname { display: block; font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; }
+    .vmeta { font-size: 10px; color: var(--dim); }
+    .vbtns { display: flex; gap: 6px; }
+    .vbtn {
+        border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+        border-radius: 6px; padding: 4px 11px; font-size: 11px; cursor: pointer; text-decoration: none;
+        display: inline-block;
+    }
+    .vbtn:hover { border-color: var(--accent); color: var(--accent); }
+    .vplayer { width: 100%; margin-top: 6px; }
+    .vplayer video { width: 100%; max-height: 320px; border-radius: 6px; background: #000; }
+    .vempty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+
+    @media (max-width: 700px) {
+        body { padding: 8px; }
+        .masthead { flex-direction: column; align-items: flex-start; }
+        .mast-right { width: 100%; justify-content: space-between; }
+        .synth-row1 { flex-direction: column; align-items: stretch; }
+        .synth-row1 select { width: 100%; }
+        .span-row { grid-template-columns: repeat(5, 1fr); }
+        .kpis { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+</style>
+</head>
+<body>
+<div class="wrap">
+    <header class="masthead">
+        <div class="brand">
+            <div class="brand-mark" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                    <circle cx="12" cy="12" r="9"/>
+                    <circle cx="12" cy="12" r="4.5"/>
+                    <circle cx="12" cy="12" r="0.8" fill="currentColor"/>
+                    <path d="M12 12 L16.5 16.5" stroke-linecap="round"/>
+                </svg>
+            </div>
+            <div>
+                <h1>天气追踪边缘节点</h1>
+                <p>Weather Tracker · Edge Node</p>
+            </div>
+        </div>
+        <div class="mast-right">
+            <div class="clock">
+                <div class="label">已运行 UPTIME</div>
+                <div class="value" id="uptimeText">00:00:00</div>
+            </div>
+            <span class="node-state running" id="nodeState"><span class="dot"></span><span id="nodeStateText">采集守护中</span></span>
+        </div>
+    </header>
+
+    <section class="panel">
+        <div class="head"><h2>合成任务</h2><span class="sub">SYNTHESIZE · 30 分钟粒度时间轴</span></div>
+        <div class="body">
+            <div class="synth-row1">
+                <select id="typeSelect" title="信源"></select>
+                <div class="span-row" id="spanRow">
+                    <button class="span-btn" data-hours="1">1h</button>
+                    <button class="span-btn" data-hours="3">3h</button>
+                    <button class="span-btn" data-hours="6">6h</button>
+                    <button class="span-btn" data-hours="12">12h</button>
+                    <button class="span-btn" data-hours="24">24h</button>
+                </div>
+                <button class="go-btn" id="goBtn">开始合成</button>
+                <div class="status-box ok" id="statusAlert">
+                    <span class="dot"></span>
+                    <span id="statusText">后台抓取守护中（待命）</span>
+                </div>
+            </div>
+            <div class="tl-head">
+                <span class="label">起始时刻</span>
+                <button class="tl-nav-btn" id="tlPrev">‹ 前一天</button>
+                <span class="tl-date" id="tlDate">--</span>
+                <button class="tl-nav-btn" id="tlNext">后一天 ›</button>
+                <button class="tl-clear" id="tlClear" hidden>清除选择</button>
+            </div>
+            <div class="tl-scroll">
+                <div class="timeline" id="timeline"></div>
+            </div>
+            <div class="tl-scale"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
+            <div class="range-line" id="rangeHint">默认：以最新一帧为终点</div>
+        </div>
+    </section>
+
+    <div class="mid">
+        <section class="panel" id="dlPanel">
+            <div class="head"><h2>下载统计</h2><span class="sub">近 24 小时 · 悬停柱体看明细</span></div>
+            <div class="body" id="downloadBody">
+                <div class="kpis">
+                    <div class="kpi ok"><div class="l">成功下载</div><div class="v" id="kpiOk">0</div></div>
+                    <div class="kpi fail"><div class="l">传输失败</div><div class="v" id="kpiFail">0</div></div>
+                    <div class="kpi missing"><div class="l">上游缺失</div><div class="v" id="kpiMissing">0</div></div>
+                    <div class="kpi"><div class="l">信源数</div><div class="v" id="kpiSources">0</div></div>
+                </div>
+                <div class="chart" id="downloadChart"></div>
+                <div class="chart-axis"><span id="axisStart">--:--</span><span>逐小时</span><span id="axisEnd">--:--</span></div>
+                <div class="legend">
+                    <span><i style="background:var(--ok);"></i>成功</span>
+                    <span><i style="background:var(--fail);"></i>传输失败</span>
+                    <span><i style="background:var(--missing);"></i>上游缺失</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="head"><h2>信源状态</h2><span class="sub">近 24 小时 · 覆盖带</span></div>
+            <div class="body" style="padding:0;">
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>信源</th>
+                                <th>24h 覆盖带</th>
+                                <th style="text-align:right;">帧数</th>
+                                <th style="text-align:right;">新增</th>
+                                <th style="text-align:right;">最早</th>
+                                <th style="text-align:right;">最新</th>
+                            </tr>
+                        </thead>
+                        <tbody id="statsBody"><tr><td colspan="6" style="color:var(--dim);">等待采集统计...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <section class="panel">
+        <div class="head"><h2>落盘统计</h2><span class="sub">各信源 24h 落盘帧数</span></div>
+        <div class="body"><div class="cards" id="cardGrid"></div></div>
+    </section>
+
+    <section class="panel">
+        <div class="head"><h2>视频产物</h2><span class="sub">点击播放 · 可下载</span></div>
+        <div class="body"><div id="videoList"><div class="vempty">加载中...</div></div></div>
+    </section>
+
+    <section class="panel">
+        <div class="head"><h2>运行日志</h2><span class="sub">保留最新 200 条</span></div>
+        <div class="terminal" id="logTerminal"><span class="empty">等待后台守护进程输出日志...</span></div>
+    </section>
+</div>
+
+<script>
+    const PALETTE = ["#0F9BA8", "#2F6FED", "#0E9F6E", "#D97706", "#7C5CFC", "#EA6A2A", "#DC4C4C", "#0AA5C9", "#4F5BD5", "#D6458C", "#64748B"];
+    let uptimeSeconds = 0;
+    let currentHours = 12;
+    let rangesData = { dates: [] };
+    let dateIdx = 0;
+    let selected = null;  // { date_str, index }
+
+    function fmtUptime(sec) {
+        const d = Math.floor(sec / 86400);
+        const h = String(Math.floor((sec % 86400) / 3600)).padStart(2, "0");
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, "0");
+        const s = String(sec % 60).padStart(2, "0");
+        return d > 0 ? `${d}天 ${h}:${m}:${s}` : `${h}:${m}:${s}`;
+    }
+    setInterval(() => { uptimeSeconds++; document.getElementById("uptimeText").textContent = fmtUptime(uptimeSeconds); }, 1000);
+
+    async function loadOptions() {
+        const res = await fetch("/api/options");
+        const data = await res.json();
+        const select = document.getElementById("typeSelect");
+        select.innerHTML = "";
+        for (const [group, opts] of Object.entries(data.groups)) {
+            const og = document.createElement("optgroup");
+            og.label = group;
+            opts.forEach(o => {
+                const option = document.createElement("option");
+                option.value = o;
+                option.textContent = o;
+                og.appendChild(option);
+            });
+            select.appendChild(og);
+        }
+        select.addEventListener("change", loadRanges);
+        await loadRanges();
+    }
+
+    function selectSpan(hours) {
+        currentHours = hours;
+        selected = null;
+        document.querySelectorAll(".span-btn").forEach(b => b.classList.toggle("active", Number(b.dataset.hours) === hours));
+        loadRanges();
+    }
+
+    function fmtSlot(index, gran) {
+        const m = index * gran;
+        return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    }
+
+    async function loadRanges() {
+        const name = document.getElementById("typeSelect").value;
+        if (!name) return;
+        try {
+            const res = await fetch(`/api/ranges?display_name=${encodeURIComponent(name)}&hours=${currentHours}`);
+            const data = await res.json();
+            rangesData = data;
+            dateIdx = 0;
+            selected = null;
+        } catch (e) {
+            rangesData = { dates: [] };
+        }
+        renderTimeline();
+    }
+
+    function renderTimeline() {
+        const tl = document.getElementById("timeline");
+        const dateLabel = document.getElementById("tlDate");
+        const prev = document.getElementById("tlPrev");
+        const next = document.getElementById("tlNext");
+        const clear = document.getElementById("tlClear");
+        tl.innerHTML = "";
+        const dates = rangesData.dates || [];
+        if (dates.length === 0) {
+            dateLabel.textContent = "暂无可用日期";
+            prev.disabled = true;
+            next.disabled = true;
+            clear.hidden = true;
+            tl.innerHTML = '<div style="grid-column:1/-1;color:var(--dim);font-size:11px;text-align:center;align-self:center;">该跨度下暂无可用起点</div>';
+            updateRangeHint();
+            return;
+        }
+        dateIdx = Math.max(0, Math.min(dateIdx, dates.length - 1));
+        const date = dates[dateIdx];
+        dateLabel.textContent = date.date;
+        // dates 为倒序（最新在前）："前一天"= 索引增大，"后一天"= 索引减小
+        prev.disabled = dateIdx >= dates.length - 1;
+        next.disabled = dateIdx <= 0;
+        clear.hidden = !selected;
+        const gran = rangesData.granularity_minutes || 30;
+        const availSet = new Set((date.available_starts || []).map(s => s.index));
+        const coveredSlots = Math.round(currentHours * 60 / gran);
+        for (let i = 0; i < 48; i++) {
+            const cell = document.createElement("div");
+            cell.className = "tl-cell";
+            const start = fmtSlot(i, gran);
+            if (date.buckets && date.buckets[i]) cell.classList.add("has");
+            if (availSet.has(i)) {
+                cell.classList.add("avail");
+                const item = (date.available_starts || []).find(s => s.index === i);
+                cell.title = `${start} 起 ${currentHours}h → ${item.end}`;
+                cell.addEventListener("click", () => selectSlot(date.date_str, i));
+            } else {
+                cell.title = `${start} 不可用`;
+            }
+            if (selected && selected.date_str === date.date_str) {
+                const rel = i - selected.index;
+                if (rel === 0) cell.classList.add("selected");
+                else if (rel > 0 && rel < coveredSlots) cell.classList.add("covered");
+            }
+            tl.appendChild(cell);
+        }
+        updateRangeHint();
+    }
+
+    function selectSlot(dateStr, index) {
+        selected = { date_str: dateStr, index };
+        renderTimeline();
+    }
+
+    function clearSelection() {
+        selected = null;
+        renderTimeline();
+    }
+
+    function updateRangeHint() {
+        const hint = document.getElementById("rangeHint");
+        const gran = rangesData.granularity_minutes || 30;
+        if (!selected) {
+            hint.textContent = "默认：以最新一帧为终点";
+            return;
+        }
+        const date = (rangesData.dates || []).find(d => d.date_str === selected.date_str);
+        const item = date ? (date.available_starts || []).find(s => s.index === selected.index) : null;
+        if (!item) {
+            hint.textContent = "默认：以最新一帧为终点";
+            return;
+        }
+        const start = fmtSlot(selected.index, gran);
+        const endLabel = item.cross_day ? `次日 ${item.end.slice(-5)}` : item.end;
+        hint.innerHTML = `跨度 <b>${currentHours}h</b> · 起点 <b>${start}</b> → 终点 <b>${endLabel}</b>`;
+    }
+
+    async function trigger() {
+        const name = document.getElementById("typeSelect").value;
+        const payload = { display_name: name, hours: currentHours };
+        if (selected) {
+            const gran = rangesData.granularity_minutes || 30;
+            payload.start_time = `${selected.date_str}_${fmtSlot(selected.index, gran).replace(":", "")}`;
+        }
+        const btn = document.getElementById("goBtn");
+        btn.disabled = true;
+        try {
+            await fetch("/api/synthesize", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        } finally {
+            btn.disabled = false;
+            pollStatus();
+        }
+    }
+
+    function renderDownloads(downloads) {
+        const hours = downloads && Array.isArray(downloads.hours) ? downloads.hours : [];
+        const totals = downloads && downloads.totals ? downloads.totals : { ok: 0, fail: 0, missing: 0 };
+        document.getElementById("kpiOk").textContent = totals.ok;
+        document.getElementById("kpiFail").textContent = totals.fail;
+        document.getElementById("kpiMissing").textContent = totals.missing;
+        const chart = document.getElementById("downloadChart");
+        chart.innerHTML = "";
+        if (hours.length === 0) {
+            chart.innerHTML = '<div style="align-self:center;color:var(--dim);font-size:11px;width:100%;text-align:center;">暂无下载统计</div>';
+            return;
+        }
+        document.getElementById("axisStart").textContent = hours[0].label;
+        document.getElementById("axisEnd").textContent = hours[hours.length - 1].label;
+        const max = Math.max(1, ...hours.map(h => h.ok + h.fail + h.missing));
+        hours.forEach((h, idx) => {
+            const col = document.createElement("div");
+            col.className = "col";
+            if (idx <= 2) col.classList.add("tip-left");
+            else if (idx >= hours.length - 3) col.classList.add("tip-right");
+            const segs = [
+                { cls: "ok", n: h.ok },
+                { cls: "fail", n: h.fail },
+                { cls: "missing", n: h.missing }
+            ];
+            segs.forEach(s => {
+                if (s.n > 0) {
+                    const seg = document.createElement("div");
+                    seg.className = "seg " + s.cls;
+                    seg.style.height = `${(s.n / max) * 100}%`;
+                    col.appendChild(seg);
+                }
+            });
+            const tip = document.createElement("div");
+            tip.className = "tip";
+            tip.textContent = `${h.label} · 成功 ${h.ok} · 失败 ${h.fail} · 缺失 ${h.missing}`;
+            col.appendChild(tip);
+            chart.appendChild(col);
+        });
+    }
+
+    function renderCards(records) {
+        const grid = document.getElementById("cardGrid");
+        grid.innerHTML = "";
+        records.forEach((r, i) => {
+            const card = document.createElement("div");
+            card.className = "card";
+            const color = PALETTE[i % PALETTE.length];
+            const hoursWithData = (r.hourly || []).filter(n => n > 0).length;
+            const cov = r.avail_24h > 0 ? Math.round(hoursWithData / 24 * 100) : 0;
+            card.style.borderColor = color;
+            card.style.borderWidth = "2px";
+            card.innerHTML = `
+                <div class="c-body">
+                    <div class="c-name">${r.display_name}</div>
+                    <div class="c-num" style="color:${color};">${r.avail_24h}</div>
+                    <div class="c-meta">最新 ${r.latest_time} · 最早 ${r.earliest_time}</div>
+                    <div class="c-meta">覆盖 ${cov}%</div>
+                    <span class="c-key">${r.key}</span>
+                </div>`;
+            grid.appendChild(card);
+        });
+    }
+
+    function renderCoverage(hourly) {
+        const cov = document.createElement("span");
+        cov.className = "coverage";
+        const arr = Array.isArray(hourly) && hourly.length === 24 ? hourly : new Array(24).fill(0);
+        arr.forEach((n, i) => {
+            const cell = document.createElement("i");
+            if (n > 0) cell.classList.add("hit");
+            cell.title = `${String((new Date().getHours() - 23 + i + 48) % 24).padStart(2, "0")}时 ${n} 帧`;
+            cov.appendChild(cell);
+        });
+        return cov;
+    }
+
+    async function pollStatus() {
+        try {
+            const res = await fetch("/api/status");
+            const data = await res.json();
+            if (data.stats.uptime !== undefined) {
+                uptimeSeconds = data.stats.uptime;
+                document.getElementById("uptimeText").textContent = fmtUptime(uptimeSeconds);
+            }
+            renderDownloads(data.downloads);
+            renderCards(data.stats.records);
+            document.getElementById("kpiSources").textContent = data.stats.records.length;
+            const tbody = document.getElementById("statsBody");
+            tbody.innerHTML = "";
+            data.stats.records.forEach(r => {
+                const tr = document.createElement("tr");
+                const tdName = document.createElement("td");
+                tdName.innerHTML = '<span class="src-name"></span>';
+                tdName.querySelector(".src-name").textContent = r.display_name;
+                const tdCov = document.createElement("td");
+                const cov = renderCoverage(r.hourly);
+                const label = document.createElement("span");
+                label.className = "coverage-label";
+                label.textContent = `${r.avail_24h} 帧`;
+                cov.appendChild(label);
+                tdCov.appendChild(cov);
+                const tdCount = document.createElement("td");
+                tdCount.className = "num";
+                tdCount.style.textAlign = "right";
+                tdCount.textContent = r.avail_24h;
+                const tdAdd = document.createElement("td");
+                tdAdd.className = "add";
+                tdAdd.style.textAlign = "right";
+                tdAdd.textContent = `+${r.session_dl}`;
+                const tdEarly = document.createElement("td");
+                tdEarly.className = "latest";
+                tdEarly.style.textAlign = "right";
+                tdEarly.textContent = r.earliest_time || "--:--";
+                const tdLatest = document.createElement("td");
+                tdLatest.className = "latest";
+                tdLatest.style.textAlign = "right";
+                tdLatest.textContent = r.latest_time || "--:--";
+                tr.append(tdName, tdCov, tdCount, tdAdd, tdEarly, tdLatest);
+                tbody.appendChild(tr);
+            });
+            renderStatus(data.synth);
+        } catch (e) { /* 服务重启间隙静默 */ }
+    }
+
+    function renderStatus(synth) {
+        const box = document.getElementById("statusAlert");
+        const text = document.getElementById("statusText");
+        text.textContent = synth.message;
+        box.className = "status-box " + (synth.type === "error" ? "err" : synth.is_running ? "warn" : "ok");
+    }
+
+    let lastLogContent = "";
+    async function pollLogs() {
+        try {
+            const res = await fetch("/api/logs");
+            const data = await res.json();
+            const term = document.getElementById("logTerminal");
+            const content = data.logs.join("\n");
+            if (content !== lastLogContent) {
+                const stick = term.scrollHeight - term.clientHeight <= term.scrollTop + 15;
+                term.innerHTML = "";
+                if (content) {
+                    term.textContent = content;
+                } else {
+                    const span = document.createElement("span");
+                    span.className = "empty";
+                    span.textContent = "等待后台守护进程输出日志...";
+                    term.appendChild(span);
+                }
+                if (stick || lastLogContent === "") term.scrollTop = term.scrollHeight;
+                lastLogContent = content;
+            }
+        } catch (e) { /* 静默 */ }
+    }
+
+    function fmtSize(n) {
+        if (n > 1048576) return (n / 1048576).toFixed(1) + " MB";
+        return Math.round(n / 1024) + " KB";
+    }
+
+    async function loadVideos() {
+        try {
+            const res = await fetch("/api/videos");
+            const data = await res.json();
+            const box = document.getElementById("videoList");
+            box.innerHTML = "";
+            if (!data.groups || data.groups.length === 0) {
+                box.innerHTML = '<div class="vempty">暂无合成产物</div>';
+                return;
+            }
+            data.groups.forEach(g => {
+                const sec = document.createElement("div");
+                sec.className = "vgroup";
+                const h = document.createElement("div");
+                h.className = "vdate";
+                h.textContent = g.date;
+                sec.appendChild(h);
+                g.videos.forEach(v => {
+                    const row = document.createElement("div");
+                    row.className = "vitem";
+                    row.innerHTML = `
+                        <div class="vmain">
+                            <span class="vname">${v.name}</span>
+                            <span class="vmeta">${fmtSize(v.size)} · ${v.mtime}${v.cron ? " · 定时" : ""}</span>
+                        </div>
+                        <div class="vbtns">
+                            <button class="vbtn play" type="button">播放</button>
+                            <a class="vbtn" href="${v.url}" download>下载</a>
+                        </div>
+                        <div class="vplayer" hidden></div>`;
+                    row.querySelector(".play").addEventListener("click", () => {
+                        const p = row.querySelector(".vplayer");
+                        if (p.hidden) {
+                            p.innerHTML = `<video controls preload="auto" src="${v.url}"></video>`;
+                            p.hidden = false;
+                        } else {
+                            p.hidden = true;
+                            p.innerHTML = "";
+                        }
+                    });
+                    sec.appendChild(row);
+                });
+                box.appendChild(sec);
+            });
+        } catch (e) { /* 静默 */ }
+    }
+
+    document.querySelectorAll(".span-btn").forEach(b => b.addEventListener("click", () => selectSpan(Number(b.dataset.hours))));
+    document.getElementById("tlPrev").addEventListener("click", () => { dateIdx++; selected = null; renderTimeline(); });
+    document.getElementById("tlNext").addEventListener("click", () => { dateIdx--; selected = null; renderTimeline(); });
+    document.getElementById("tlClear").addEventListener("click", clearSelection);
+    document.getElementById("goBtn").addEventListener("click", trigger);
+    selectSpan(12);
+    loadOptions();
+    pollStatus();
+    pollLogs();
+    loadVideos();
+    setInterval(pollStatus, 2000);
+    setInterval(pollLogs, 2000);
+    setInterval(loadVideos, 60000);
+</script>
+</body>
+</html>
