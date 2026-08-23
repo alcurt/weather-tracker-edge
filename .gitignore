@@ -30,6 +30,9 @@ ffmpeg.exe
 .env.*
 !.env.example
 
+# Local agent instructions (kept out of the public repo)
+AGENTS.md
+
 # IDE / editor
 .idea/
 .vscode/
