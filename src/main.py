@@ -334,8 +334,6 @@ SLOTS_PER_DAY = 24 * 60 // RANGE_GRANULARITY_MINUTES  # 48
 RANGES_CACHE_TTL = 60
 _ranges_cache = {}  # (img_type, hours) -> (expire_ts, data)
 
-VIDEOS_CACHE_TTL = 30
-_videos_cache = {"expire": 0.0, "groups": None}
 
 
 def compute_available_ranges(img_type: str, hours: int) -> dict:
@@ -488,8 +486,11 @@ def _scan_videos() -> list:
                 continue
             rel = mp4.relative_to(output_dir).as_posix()
             parts = mp4.name.split("_")
-            date_str = parts[1] if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit() else None
-            group_date = date_str or datetime.fromtimestamp(st.st_mtime, TZ_UTC8).strftime("%Y%m%d")
+            # 优先取结束日期：跨日产物（类型_起始日期_起始时间_to_结束日期_结束时间.mp4）
+            # 按结束日期分组，符合"合成/结束当天"直觉；同日或旧格式退回起始日期，最后回退 mtime
+            end_date = parts[4] if len(parts) >= 5 and len(parts[4]) == 8 and parts[4].isdigit() else None
+            start_date = parts[1] if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit() else None
+            group_date = end_date or start_date or datetime.fromtimestamp(st.st_mtime, TZ_UTC8).strftime("%Y%m%d")
             items.append({
                 "name": mp4.name,
                 "url": f"/videos/{rel}",
@@ -509,12 +510,8 @@ def _scan_videos() -> list:
 
 @app.get("/api/videos")
 async def get_videos():
-    now_ts = time.time()
-    if _videos_cache["groups"] is not None and _videos_cache["expire"] > now_ts:
-        return {"code": 200, "groups": _videos_cache["groups"]}
+    """视频产物列表：文件数量少，扫描开销低，不做缓存以保证合成后刷新即最新"""
     groups = await asyncio.to_thread(_scan_videos)
-    _videos_cache["expire"] = now_ts + VIDEOS_CACHE_TTL
-    _videos_cache["groups"] = groups
     return {"code": 200, "groups": groups}
 
 
