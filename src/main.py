@@ -267,7 +267,8 @@ async def stats_loop():
     while True:
         try:
             now = datetime.now(TZ_UTC8)
-            GLOBAL_STATS["records"] = collect_stats(now, session_counts, last_cursors, dir_cache)
+            records = await asyncio.to_thread(collect_stats, now, session_counts, last_cursors, dir_cache)
+            GLOBAL_STATS["records"] = records
             GLOBAL_STATS["last_updated"] = now.strftime("%H:%M:%S")
         except Exception as e:
             logger.error(f"UI数据观测者发生异常: {e}")
