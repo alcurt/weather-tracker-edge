@@ -134,6 +134,7 @@ def test_radar_loop_tick_runs_without_network(monkeypatch):
         poller = object.__new__(poller_module.AsyncPoller)
         poller.probes = SlotProbeCache()
         poller.metrics = {}
+        poller._last_backfill = {}
         poller._ensure_client = noop
         poller._backfill_radar_source = noop
         poller._fetch_single_radar = fake_fetch

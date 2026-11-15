@@ -121,6 +121,8 @@ class AsyncPoller:
         self._retire_tasks: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
         self.probes = SlotProbeCache()
+        self._last_backfill: dict[str, float] = {}
+        self._last_sweep: dict[str, float] = {}
 
         # 核心新增：轻量化共享指标矩阵，为无头节点维护观测链路
         self.metrics = {
@@ -278,77 +280,89 @@ class AsyncPoller:
                 f"已存在 {counts['EXIST']} 张，上游缺失 {counts['404']} 个时次，失败 {counts['FAIL']} 个。"
             )
 
-    async def _loop_radar_source(self, radar_type: str):
-        """雷达图专属独立协程：滑动窗口 + 周期缺口回补"""
-        logger.info(f"[{radar_type}] 独立滑动窗口监听线程启动...")
-        last_backfill = 0.0
+    async def _run_loop(self, name: str, tick, initial_status: str = "INIT", record_on_error: bool = False):
+        """统一信源轮询节拍：执行 tick、上报指标、flush 统计并按间隔休眠。"""
         while True:
             start_time = time.time()
-            status_summary = "304"  # 默认若无实际落盘则定义为无变更状态
-
+            status = initial_status
             try:
-                await self._ensure_client()
-                now = datetime.now(TZ_UTC8)
-
-                # 启动即回补最近数小时缺口，之后每 30 分钟补漏一次
-                if time.time() - last_backfill >= RADAR_BACKFILL_INTERVAL_MINUTES * 60:
-                    await self._backfill_radar_source(radar_type, now)
-                    last_backfill = time.time()
-
-                base_time = now.replace(
-                    minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
-                    second=0,
-                    microsecond=0,
-                )
-                slot_count = int(RADAR_POLL_WINDOW_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
-                pairs = [
-                    (target_time, grid_slot_key(radar_type, target_time))
-                    for target_time in (
-                        base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
-                        for i in range(slot_count)
-                    )
-                ]
-                self.probes.prune({key for _, key in pairs})
-                pending = [
-                    (t, key) for t, key in pairs
-                    if slot_is_mature(now, t, RADAR_MIN_AGE_MINUTES) and self.probes.should_probe(key)
-                ]
-
-                results = []
-                if pending:
-                    semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
-
-                    async def fetch_one(
-                        target_time: datetime, sem: asyncio.Semaphore = semaphore
-                    ) -> str:
-                        async with sem:
-                            return await self._fetch_single_radar(radar_type, target_time)
-
-                    results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
-                    self._record_download_results(
-                        radar_type, results,
-                        item_keys=[key for _, key in pending],
-                        pending_grace_minutes=RADAR_PENDING_GRACE_MINUTES,
-                    )
-                    self._mark_probe_results(pending, results)
-
-                if "200" in results:
-                    status_summary = "200"
-                elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
-                    status_summary = "ERROR"
+                status = await tick()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error(f"[{radar_type}] 轮询异常 (隔离不扩散): {e}")
-                status_summary = "CRASH"
+                logger.error(f"[{name}] 轮询异常 (隔离不扩散): {e}")
+                status = "CRASH"
+                if record_on_error:
+                    self._record_download_results(name, ["CRASH"])
 
             elapsed = time.time() - start_time
-            # 增量推送当前信源指标
-            self.metrics[radar_type] = {
+            self.metrics[name] = {
                 "elapsed": elapsed,
-                "status": status_summary,
-                "updated_at": time.time()
+                "status": status,
+                "updated_at": time.time(),
             }
             await download_stats.flush()
             await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
+
+    async def _radar_tick(self, radar_type: str) -> str:
+        await self._ensure_client()
+        now = datetime.now(TZ_UTC8)
+
+        # 启动即回补最近数小时缺口，之后每 30 分钟补漏一次
+        last_backfill = self._last_backfill.get(radar_type, 0.0)
+        if time.time() - last_backfill >= RADAR_BACKFILL_INTERVAL_MINUTES * 60:
+            await self._backfill_radar_source(radar_type, now)
+            self._last_backfill[radar_type] = time.time()
+
+        base_time = now.replace(
+            minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
+            second=0,
+            microsecond=0,
+        )
+        slot_count = int(RADAR_POLL_WINDOW_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
+        pairs = [
+            (target_time, grid_slot_key(radar_type, target_time))
+            for target_time in (
+                base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
+                for i in range(slot_count)
+            )
+        ]
+        self.probes.prune({key for _, key in pairs})
+        pending = [
+            (t, key) for t, key in pairs
+            if slot_is_mature(now, t, RADAR_MIN_AGE_MINUTES) and self.probes.should_probe(key)
+        ]
+
+        results = []
+        if pending:
+            semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
+
+            async def fetch_one(target_time: datetime, sem: asyncio.Semaphore = semaphore) -> str:
+                async with sem:
+                    return await self._fetch_single_radar(radar_type, target_time)
+
+            results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
+            self._record_download_results(
+                radar_type, results,
+                item_keys=[key for _, key in pending],
+                pending_grace_minutes=RADAR_PENDING_GRACE_MINUTES,
+            )
+            self._mark_probe_results(pending, results)
+
+        if "200" in results:
+            return "200"
+        if any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
+            return "ERROR"
+        return "304"
+
+    async def _loop_radar_source(self, radar_type: str):
+        """雷达图专属独立协程：滑动窗口 + 周期缺口回补"""
+        logger.info(f"[{radar_type}] 独立滑动窗口监听线程启动...")
+        await self._run_loop(
+            radar_type,
+            lambda: self._radar_tick(radar_type),
+            initial_status="304",
+        )
 
     async def _fetch_single_nmc(
         self, img_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
@@ -490,183 +504,172 @@ class AsyncPoller:
 
         await download_stats.flush()
 
+    async def _nmc_tick(self, img_type: str) -> str:
+        await self._ensure_client()
+        last_sweep = self._last_sweep.get(img_type, 0.0)
+        if time.time() - last_sweep >= NMC_GAP_SWEEP_INTERVAL_MINUTES * 60:
+            await self._backfill_nmc_source(img_type)
+            self._last_sweep[img_type] = time.time()
+
+        cfg = NMC_SATELLITE_TYPES[img_type]
+        step_minutes = cfg["interval_minutes"]
+        now = datetime.now(TZ_UTC8)
+        base_time = now.replace(minute=(now.minute // step_minutes) * step_minutes, second=0, microsecond=0)
+
+        slot_count = int(NMC_POLL_WINDOW_HOURS * 60 / step_minutes)
+        pairs = [
+            (target_time, grid_slot_key(img_type, target_time))
+            for target_time in (
+                base_time - timedelta(minutes=step_minutes * i)
+                for i in range(slot_count)
+            )
+        ]
+        self.probes.prune({key for _, key in pairs})
+        pending = [
+            (t, key) for t, key in pairs
+            if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES) and self.probes.should_probe(key)
+        ]
+
+        results = []
+        if pending:
+            semaphore = asyncio.Semaphore(NMC_BACKFILL_CONCURRENCY)
+
+            async def fetch_one(target_time: datetime, sem: asyncio.Semaphore = semaphore) -> str:
+                async with sem:
+                    return await self._fetch_single_nmc(img_type, target_time)
+
+            results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
+            self._record_download_results(
+                img_type, results,
+                item_keys=[key for _, key in pending],
+                pending_grace_minutes=NMC_PENDING_GRACE_MINUTES,
+            )
+            self._mark_probe_results(pending, results)
+
+        if "200" in results:
+            return "200"
+        if any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
+            return "ERROR"
+        return "304"
+
     async def _loop_nmc_source(self, img_type: str):
         """中央台卫星源专属协程：两阶段回补后进入 4 小时增量探测，并周期补历史缺口。"""
         logger.info(f"[{img_type}] 独立中央台卫星源监听线程启动...")
-        await self._backfill_nmc_source(img_type)
-        last_sweep = time.time()
+        try:
+            await self._backfill_nmc_source(img_type)
+        except Exception as e:
+            logger.error(f"[{img_type}] 启动回补失败，转入常规轮询: {e}")
+        self._last_sweep[img_type] = time.time()
+        await self._run_loop(
+            img_type,
+            lambda: self._nmc_tick(img_type),
+            initial_status="304",
+        )
 
-        while True:
-            start_time = time.time()
-            status_summary = "304"  # 默认无新增
+    async def _static_tick(self, img_type: str, url: str) -> str:
+        status_code = "INIT"
+        cursor_mgr = self.cursors[img_type]
+        await self._ensure_client()
+        cursor_data = cursor_mgr.read()
+        headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+        if cursor_data["last_modified"]:
+            headers["If-Modified-Since"] = cursor_data["last_modified"]
 
+        target_url = f"{url}?_ts={time.time()}"
+
+        attempt = 0
+        while attempt <= MAX_RETRIES:
             try:
-                await self._ensure_client()
-                if time.time() - last_sweep >= NMC_GAP_SWEEP_INTERVAL_MINUTES * 60:
-                    await self._backfill_nmc_source(img_type)
-                    last_sweep = time.time()
-                cfg = NMC_SATELLITE_TYPES[img_type]
-                step_minutes = cfg["interval_minutes"]
-                now = datetime.now(TZ_UTC8)
-                base_time = now.replace(minute=(now.minute // step_minutes) * step_minutes, second=0, microsecond=0)
+                async with self.client.stream("GET", target_url, headers=headers) as response:
+                    status_code = str(response.status_code)
+                    if response.status_code == 304:
+                        break
+                    if is_retryable_status(response.status_code):
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {response.status_code}", request=response.request, response=response
+                        )
 
-                slot_count = int(NMC_POLL_WINDOW_HOURS * 60 / step_minutes)
-                pairs = [
-                    (target_time, grid_slot_key(img_type, target_time))
-                    for target_time in (
-                        base_time - timedelta(minutes=step_minutes * i)
-                        for i in range(slot_count)
-                    )
-                ]
-                self.probes.prune({key for _, key in pairs})
-                pending = [
-                    (t, key) for t, key in pairs
-                    if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES) and self.probes.should_probe(key)
-                ]
+                    response.raise_for_status()
+                    server_last_modified = response.headers.get("Last-Modified")
+                    server_content_length = response.headers.get("Content-Length")
 
-                results = []
-                if pending:
-                    semaphore = asyncio.Semaphore(NMC_BACKFILL_CONCURRENCY)
+                    if (server_last_modified == cursor_data["last_modified"] and
+                        server_content_length == cursor_data["content_length"]):
+                        status_code = "304"
+                        break
 
-                    async def fetch_one(
-                        target_time: datetime, sem: asyncio.Semaphore = semaphore
-                    ) -> str:
-                        async with sem:
-                            return await self._fetch_single_nmc(img_type, target_time)
+                    logger.info(f"[{img_type}] 探测到新响应头，开始下载实体流...")
+                    content = await response.aread()
 
-                    results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
-                    self._record_download_results(
-                        img_type, results,
-                        item_keys=[key for _, key in pending],
-                        pending_grace_minutes=NMC_PENDING_GRACE_MINUTES,
-                    )
-                    self._mark_probe_results(pending, results)
+                    try:
+                        img = Image.open(io.BytesIO(content))
+                        img.verify()
+                    except Exception as e:
+                        logger.warning(f"[{img_type}] 图像尾块损坏(上游竞态写入): {e}")
+                        raise ValueError("Image IEND validation failed.") from e
 
-                if "200" in results:
-                    status_summary = "200"
-                elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
-                    status_summary = "ERROR"
-            except Exception as e:
-                logger.error(f"[{img_type}] 轮询异常 (隔离不扩散): {e}")
-                status_summary = "CRASH"
+                    file_hash = hashlib.sha256(content).hexdigest()
+                    if file_hash == cursor_data.get("hash"):
+                        await cursor_mgr.update(
+                            server_last_modified,
+                            server_content_length,
+                            file_hash,
+                            cursor_data.get("file_path", ""),
+                        )
+                        status_code = "304"
+                        break
 
-            elapsed = time.time() - start_time
-            self.metrics[img_type] = {
-                "elapsed": elapsed,
-                "status": status_summary,
-                "updated_at": time.time()
-            }
-            await download_stats.flush()
-            await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
+                    try:
+                        if server_last_modified:
+                            dt_gmt = email.utils.parsedate_to_datetime(server_last_modified)
+                            true_time = dt_gmt.astimezone(TZ_UTC8)
+                        else:
+                            true_time = datetime.now(TZ_UTC8)
+                    except Exception:
+                        true_time = datetime.now(TZ_UTC8)
+
+                    date_str = true_time.strftime("%Y%m%d")
+                    time_str = true_time.strftime("%Y%m%d_%H%M%S")
+                    file_name = f"{time_str}_{img_type}.png"
+                    file_path = cursor_mgr.type_dir / date_str / file_name
+
+                    await atomic_write_bytes_async(file_path, content)
+
+                    logger.info(f"[{img_type}] 新气象图成功落盘: {file_name}")
+                    await cursor_mgr.update(server_last_modified, server_content_length, file_hash, str(file_path))
+                    status_code = "200"
+                    break
+            except httpx.HTTPStatusError as e:
+                if not is_retryable_status(e.response.status_code):
+                    logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}")
+                    status_code = "ERROR"
+                    break
+                attempt += 1
+                status_code = "ERROR"
+                if attempt > MAX_RETRIES:
+                    logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
+                    break
+                await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
+            except (httpx.RequestError, ValueError):
+                attempt += 1
+                status_code = "ERROR"
+                if attempt > MAX_RETRIES:
+                    logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
+                    break
+                await asyncio.sleep(retry_delay(attempt))
+
+        self._record_download_results(img_type, [status_code])
+        return status_code
 
     async def _loop_single_source(self, img_type: str, url: str):
         """静态实况图专属独立协程：网络故障退避在单线内收容"""
         logger.info(f"[{img_type}] 独立流式截断监听线程启动...")
-        while True:
-            start_time = time.time()
-            status_code = "INIT"
-            cursor_mgr = self.cursors[img_type]
-            
-            try:
-                await self._ensure_client()
-                cursor_data = cursor_mgr.read()
-                headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
-                if cursor_data["last_modified"]:
-                    headers["If-Modified-Since"] = cursor_data["last_modified"]
-
-                ts = str(time.time())
-                target_url = f"{url}?_ts={ts}"
-
-                attempt = 0
-                while attempt <= MAX_RETRIES:
-                    try:
-                        async with self.client.stream("GET", target_url, headers=headers) as response:
-                            status_code = str(response.status_code)
-                            if response.status_code == 304:
-                                break
-                            if is_retryable_status(response.status_code):
-                                raise httpx.HTTPStatusError(
-                                    f"HTTP {response.status_code}", request=response.request, response=response
-                                )
-
-                            response.raise_for_status()
-                            server_last_modified = response.headers.get("Last-Modified")
-                            server_content_length = response.headers.get("Content-Length")
-
-                            if (server_last_modified == cursor_data["last_modified"] and
-                                server_content_length == cursor_data["content_length"]):
-                                status_code = "304"
-                                break
-
-                            logger.info(f"[{img_type}] 探测到新响应头，开始下载实体流...")
-                            content = await response.aread()
-
-                            try:
-                                img = Image.open(io.BytesIO(content))
-                                img.verify()
-                            except Exception as e:
-                                logger.warning(f"[{img_type}] 图像尾块损坏(上游竞态写入): {e}")
-                                raise ValueError("Image IEND validation failed.") from e
-
-                            file_hash = hashlib.sha256(content).hexdigest()
-                            if file_hash == cursor_data.get("hash"):
-                                await cursor_mgr.update(server_last_modified, server_content_length, file_hash, cursor_data.get("file_path", ""))
-                                status_code = "304"
-                                break
-
-                            try:
-                                if server_last_modified:
-                                    dt_gmt = email.utils.parsedate_to_datetime(server_last_modified)
-                                    true_time = dt_gmt.astimezone(TZ_UTC8)
-                                else:
-                                    true_time = datetime.now(TZ_UTC8)
-                            except Exception:
-                                true_time = datetime.now(TZ_UTC8)
-
-                            date_str = true_time.strftime("%Y%m%d")
-                            time_str = true_time.strftime("%Y%m%d_%H%M%S")
-
-                            file_name = f"{time_str}_{img_type}.png"
-                            file_path = cursor_mgr.type_dir / date_str / file_name
-
-                            await atomic_write_bytes_async(file_path, content)
-
-                            logger.info(f"[{img_type}] 新气象图成功落盘: {file_name}")
-                            await cursor_mgr.update(server_last_modified, server_content_length, file_hash, str(file_path))
-                            status_code = "200"
-                            break
-                    except httpx.HTTPStatusError as e:
-                        if not is_retryable_status(e.response.status_code):
-                            logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}")
-                            status_code = "ERROR"
-                            break
-                        attempt += 1
-                        status_code = "ERROR"
-                        if attempt > MAX_RETRIES:
-                            logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
-                            break
-                        await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
-                    except (httpx.RequestError, ValueError):
-                        attempt += 1
-                        status_code = "ERROR"
-                        if attempt > MAX_RETRIES:
-                            logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
-                            break
-                        await asyncio.sleep(retry_delay(attempt))
-            except Exception as e:
-                logger.error(f"[{img_type}] 致命异常: {e}")
-                status_code = "CRASH"
-                
-            elapsed = time.time() - start_time
-            # 写入全局总线字典
-            self.metrics[img_type] = {
-                "elapsed": elapsed,
-                "status": status_code,
-                "updated_at": time.time()
-            }
-            self._record_download_results(img_type, [status_code])
-            await download_stats.flush()
-            await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
+        await self._run_loop(
+            img_type,
+            lambda: self._static_tick(img_type, url),
+            initial_status="INIT",
+            record_on_error=True,
+        )
 
     async def _monitor_loop(self):
         """专职全局观测协程：输出全节点脉搏报告，完美兼容飞行中状态"""
