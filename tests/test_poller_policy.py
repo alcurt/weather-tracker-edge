@@ -85,3 +85,36 @@ def test_radar_backfill_only_probes_mature_slots():
     assert max(fetched) <= now - timedelta(minutes=poller_module.RADAR_MIN_AGE_MINUTES)
     # 6 小时 / 6 分钟 = 60 个成熟时次（当前未成熟时次被排除）
     assert len(fetched) == 60
+
+
+def test_radar_loop_tick_runs_without_network(monkeypatch):
+    fetched = []
+
+    async def noop(*args, **kwargs):
+        return None
+
+    async def fake_fetch(radar_type, target_time, max_retries=None):
+        fetched.append(target_time)
+        return "404"
+
+    async def scenario():
+        poller = object.__new__(poller_module.AsyncPoller)
+        poller.probes = SlotProbeCache()
+        poller.metrics = {}
+        poller._ensure_client = noop
+        poller._backfill_radar_source = noop
+        poller._fetch_single_radar = fake_fetch
+        poller._record_download_results = lambda *args, **kwargs: None
+
+        task = asyncio.create_task(poller._loop_radar_source("RadarGZ"))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return poller.metrics
+
+    metrics = asyncio.run(scenario())
+    assert fetched
+    assert metrics["RadarGZ"]["status"] == "304"
