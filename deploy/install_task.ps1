@@ -12,10 +12,15 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = "WeatherTrackerEdgeNode",
-    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$ProjectRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = Split-Path -Parent $PSScriptRoot
+}
+
 $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $pythonw = Join-Path $root ".venv\Scripts\pythonw.exe"
 $entry = Join-Path $root "src\main.py"

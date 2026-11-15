@@ -10,8 +10,12 @@
 param(
     [string]$TaskName = "WeatherTrackerEdgeNode",
     [int]$Port = 11451,
-    [string]$LogPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "logs\watchdog.log")
+    [string]$LogPath = ""
 )
+
+if ([string]::IsNullOrWhiteSpace($LogPath)) {
+    $LogPath = Join-Path (Split-Path -Parent $PSScriptRoot) "logs\watchdog.log"
+}
 
 $healthUrl = "http://127.0.0.1:$Port/api/health"
 $healthy = $false

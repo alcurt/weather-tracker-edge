@@ -157,6 +157,7 @@ GuangzhouWeatherTracker/
 ├── logs/
 │   └── tracker.log                # 轮转与持久化双写系统日志
 ├── deploy/
+│   ├── configure_startup.ps1      # 启动方式选择（默认手动，可选开机自启）
 │   ├── install_task.ps1           # 注册开机自启计划任务（SYSTEM）
 │   ├── uninstall_task.ps1         # 卸载计划任务
 │   └── watchdog.ps1               # 健康检查失败时重启计划任务
@@ -238,19 +239,22 @@ New-NetFirewallRule -DisplayName "Weather Tracker Edge Node" -Direction Inbound 
 
 ```
 
-#### 5.3 无头进程后台部署（计划任务推荐 / VBS 手动）
+#### 5.3 无头进程启动（默认手动 / 可选开机自启）
 
-生产节点不应使用 VS Code 或 CMD 窗口挂留进程。推荐由计划任务以 `pythonw.exe` 无窗口启动，并在异常退出时自动重启：
+生产节点不应使用 VS Code 或 CMD 窗口挂留进程。**默认方式为手动启动，不注册任何开机任务**：双击 `start_node.vbs`，由 `pythonw.exe` 无窗口拉起。
+
+需要开机自启时再显式选择；不带参数运行会进入交互选择，直接回车即手动（默认）：
 
 ```powershell
-# 管理员 PowerShell，项目根目录
-.\deploy\install_task.ps1
-Start-ScheduledTask -TaskName WeatherTrackerEdgeNode
+.\deploy\configure_startup.ps1                 # 交互选择，默认手动
+.\deploy\configure_startup.ps1 -Mode manual    # 移除计划任务，回到手动（需管理员）
+.\deploy\configure_startup.ps1 -Mode auto      # 注册 SYSTEM 计划任务（需管理员）
+.\deploy\configure_startup.ps1 -Mode status    # 查看当前方式
 ```
 
-计划任务名为 `WeatherTrackerEdgeNode`，以 SYSTEM 身份运行，`RestartCount=3`、间隔 1 分钟；`deploy\uninstall_task.ps1` 可卸载。`deploy\watchdog.ps1` 会探测 `/api/health`，失败时停止并重新启动该任务，适合再注册一个每 5 分钟运行一次的计划任务。
+计划任务名为 `WeatherTrackerEdgeNode`，以 SYSTEM 身份运行，`pythonw.exe` 启动，`RestartCount=3`、间隔 1 分钟。`deploy\install_task.ps1` / `uninstall_task.ps1` 是底层等价脚本；`deploy\watchdog.ps1` 会探测 `/api/health`，失败时停止并重新启动该任务，适合再注册一个每 5 分钟运行一次的计划任务。
 
-如不希望注册计划任务，仍可手动双击 `start_node.vbs`：
+手动启动脚本：
 
 ```vbscript
 Set WshShell = CreateObject("WScript.Shell")
@@ -262,10 +266,11 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 
 日常运维及监控：
 
-* **启动**：`Start-ScheduledTask -TaskName WeatherTrackerEdgeNode`，或双击 `start_node.vbs`。
+* **启动（默认）**：双击 `start_node.vbs`。
+* **启动（已开启自启）**：`Start-ScheduledTask -TaskName WeatherTrackerEdgeNode`。
 * **控制**：在同局域网的任意终端浏览器访问 `http://<i5-4200U局域网IP>:11451`。
 * **健康检查**：`http://<节点IP>:11451/api/health`，200 为 `ok/starting`，503 为 `degraded`。
-* **终止**：`Stop-ScheduledTask -TaskName WeatherTrackerEdgeNode`，或 `stop_node.bat` / `taskkill /f /im pythonw.exe`。
+* **终止**：`stop_node.bat` / `taskkill /f /im pythonw.exe`；若启用了计划任务，另执行 `Stop-ScheduledTask -TaskName WeatherTrackerEdgeNode`。
 
 ### 5.4 台式机开发 → 笔记本同步清单
 
@@ -274,7 +279,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 * `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/web.py`、`src/logbus.py`、`src/dashboard.html`
 * `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/jobs.py`、`src/fetch.py`、`src/storage.py`
 * `README.md`、`PRD.md`
-* `deploy\install_task.ps1`、`deploy\uninstall_task.ps1`、`deploy\watchdog.ps1`
+* `deploy\configure_startup.ps1`、`deploy\install_task.ps1`、`deploy\uninstall_task.ps1`、`deploy\watchdog.ps1`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
 
 笔记本重启服务后自动生效：启动时 FY4C 先回补最近 24 小时，再按上游实际保留深度自适应延伸到目标 48 小时（当前实测约 24 小时），下载统计从空计数开始累计。每日总结只在 `00:15` 进程在线时触发，启动时不会补跑历史任务。
