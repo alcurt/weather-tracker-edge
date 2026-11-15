@@ -230,7 +230,9 @@ class AsyncPoller:
             else:
                 self.probes.mark_transient(key)
 
-    async def _fetch_single_radar(self, radar_type: str, target_time: datetime) -> str:
+    async def _fetch_single_radar(
+        self, radar_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
+    ) -> str:
         """抓取单个时刻雷达图：内置坏图免疫与断点续传校验"""
         date_str = target_time.strftime("%Y%m%d")
         upstream_time_str = target_time.strftime("%Y%m%d%H%M00")
@@ -254,7 +256,7 @@ class AsyncPoller:
         url = build_radar_url(radar_type, target_time)
 
         attempt = 0
-        while attempt <= MAX_RETRIES:
+        while attempt <= max_retries:
             try:
                 async with self.client.stream("GET", url) as response:
                     if response.status_code == 404:
@@ -283,13 +285,13 @@ class AsyncPoller:
                     logger.error(f"[{radar_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次 {upstream_time_str}")
                     return "ERROR"
                 attempt += 1
-                if attempt > MAX_RETRIES:
+                if attempt > max_retries:
                     logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
                     return "FETCH_ERR"
                 await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
             except (httpx.RequestError, ValueError):
                 attempt += 1
-                if attempt > MAX_RETRIES:
+                if attempt > max_retries:
                     logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
                     return "FETCH_ERR"
                 await asyncio.sleep(retry_delay(attempt))
@@ -318,7 +320,8 @@ class AsyncPoller:
 
         async def fetch_one(target_time: datetime) -> str:
             async with semaphore:
-                return await self._fetch_single_radar(radar_type, target_time)
+                # 历史缺口只尝试一次，失败留给下一轮回补，避免单轮长时间阻塞
+                return await self._fetch_single_radar(radar_type, target_time, max_retries=0)
 
         results = await asyncio.gather(*[fetch_one(t) for t, _ in pairs])
         self._record_download_results(
@@ -409,7 +412,9 @@ class AsyncPoller:
             await download_stats.flush()
             await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
 
-    async def _fetch_single_nmc(self, img_type: str, target_time: datetime) -> str:
+    async def _fetch_single_nmc(
+        self, img_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
+    ) -> str:
         """抓取单个时次中央台卫星云图：本地去重 + 404 容忍 + 坏图重抓"""
         file_name = f"{target_time.strftime('%Y%m%d_%H%M%S')}_{img_type}.png"
         save_dir = DATA_DIR / img_type / target_time.strftime("%Y%m%d")
@@ -428,7 +433,7 @@ class AsyncPoller:
 
         url = build_nmc_url(img_type, target_time)
         attempt = 0
-        while attempt <= MAX_RETRIES:
+        while attempt <= max_retries:
             try:
                 async with self.client.stream("GET", url) as response:
                     if response.status_code == 404:
@@ -458,13 +463,13 @@ class AsyncPoller:
                     logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次")
                     return "ERROR"
                 attempt += 1
-                if attempt > MAX_RETRIES:
+                if attempt > max_retries:
                     logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
                     return "FETCH_ERR"
                 await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
             except (httpx.RequestError, ValueError):
                 attempt += 1
-                if attempt > MAX_RETRIES:
+                if attempt > max_retries:
                     logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
                     return "FETCH_ERR"
                 await asyncio.sleep(retry_delay(attempt))
@@ -525,7 +530,7 @@ class AsyncPoller:
 
         async def fetch_one(target_time: datetime) -> str:
             async with semaphore:
-                return await self._fetch_single_nmc(img_type, target_time)
+                return await self._fetch_single_nmc(img_type, target_time, max_retries=0)
 
         counts = {"200": 0, "EXIST": 0, "404": 0, "FAIL": 0}
         for i in range(0, len(slots), NMC_BACKFILL_BATCH_SIZE):

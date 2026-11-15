@@ -71,7 +71,7 @@ def test_radar_backfill_only_probes_mature_slots():
     poller.probes = SlotProbeCache()
     fetched = []
 
-    async def fake_fetch(radar_type, target_time):
+    async def fake_fetch(radar_type, target_time, max_retries=None):
         fetched.append(target_time)
         return "EXIST"
 

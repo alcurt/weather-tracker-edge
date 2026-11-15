@@ -75,3 +75,24 @@ def test_fetch_radar_does_not_retry_permanent_4xx(tmp_path, monkeypatch):
 
     assert asyncio.run(scenario()) == "ERROR"
     assert len(calls) == 1
+
+
+def test_backfill_fetch_uses_single_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(poller_module, "DATA_DIR", tmp_path)
+    calls = []
+
+    def handler(request):
+        calls.append(request.url)
+        return httpx.Response(503, content=b"busy")
+
+    async def scenario():
+        poller = await _make_poller(handler)
+        try:
+            return await poller._fetch_single_radar(
+                "RadarGZ", datetime(2026, 1, 1, 12, 12, tzinfo=TZ_UTC8), max_retries=0
+            )
+        finally:
+            await poller.client.aclose()
+
+    assert asyncio.run(scenario()) == "FETCH_ERR"
+    assert len(calls) == 1
