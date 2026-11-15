@@ -4,8 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>天气追踪边缘节点</title>
+<script>
+    (function () {
+        try {
+            var forced = new URLSearchParams(location.search).get("theme");
+            var saved = localStorage.getItem("wt-theme");
+            if (forced === "dark" || forced === "light") {
+                document.documentElement.dataset.theme = forced;
+            } else if (saved === "dark" || saved === "light") {
+                document.documentElement.dataset.theme = saved;
+            }
+        } catch (e) { /* localStorage 不可用时保持浅色 */ }
+    })();
+</script>
 <style>
     :root {
+        color-scheme: light;
         --bg: #F3F6FA;
         --panel: #FFFFFF;
         --panel2: #F8FAFD;
@@ -18,13 +32,59 @@
         --ok: #0E9F6E;
         --fail: #E05252;
         --missing: #D97706;
+        --card-a: #FFFFFF;
+        --card-b: #FBFDFF;
+        --term-a: #FBFDFF;
+        --term-b: #F6F9FD;
+        --vitem-a: #FFFFFF;
+        --vitem-b: #FAFCFE;
+        --track: #E5EAF2;
+        --scroll: #CBD5E1;
+        --log-text: #3E4C60;
+        --tl-hit: #D9EEF1;
+        --tl-hit-line: #BFE3E7;
+        --tip-bg: #1B2735;
+        --tip-text: #FFFFFF;
+        --shadow: rgba(27, 39, 53, 0.07);
+        --on-accent: #FFFFFF;
         --sans: "Google Sans Flex", "Noto Sans SC", "Noto Sans", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+    }
+    :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #0D1218;
+        --panel: #151C24;
+        --panel2: #1A222C;
+        --line: #27313D;
+        --text: #E6EDF6;
+        --muted: #A8B6C8;
+        --dim: #718198;
+        --accent: #4DD8E2;
+        --accent-dim: rgba(77, 216, 226, 0.12);
+        --ok: #3BD69B;
+        --fail: #FF7272;
+        --missing: #F3A94B;
+        --card-a: #18212B;
+        --card-b: #141B23;
+        --term-a: #121922;
+        --term-b: #0F151C;
+        --vitem-a: #18212B;
+        --vitem-b: #151C24;
+        --track: #2A3542;
+        --scroll: #3B4859;
+        --log-text: #C9D5E4;
+        --tl-hit: #1D3A43;
+        --tl-hit-line: #2B5B66;
+        --tip-bg: #E6EDF6;
+        --tip-text: #0D1218;
+        --shadow: rgba(0, 0, 0, 0.38);
+        --on-accent: #061318;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { zoom: 1.2; }
     body {
         background: var(--bg);
         color: var(--text);
+        transition: background 0.2s, color 0.2s;
         font-family: var(--sans);
         min-height: 100vh;
         padding: 12px;
@@ -63,6 +123,18 @@
     .node-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
     .node-state.running .dot { animation: pulse 1.8s ease-in-out infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .theme-toggle {
+        width: 32px; height: 32px; flex: 0 0 auto;
+        display: grid; place-items: center;
+        border: 1px solid var(--line); background: var(--panel2); color: var(--muted);
+        border-radius: 9px; cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+    .theme-toggle svg { width: 16px; height: 16px; }
+    .theme-toggle .i-sun { display: none; }
+    :root[data-theme="dark"] .theme-toggle .i-sun { display: block; }
+    :root[data-theme="dark"] .theme-toggle .i-moon { display: none; }
 
     /* 面板通用 */
     .panel {
@@ -106,7 +178,7 @@
     .go-btn {
         border: 1px solid var(--accent);
         background: var(--accent);
-        color: #FFFFFF;
+        color: var(--on-accent);
         font-size: 13px;
         font-weight: 600;
         letter-spacing: 0.12em;
@@ -175,16 +247,16 @@
         cursor: default;
         position: relative;
     }
-    .tl-cell.has { background: #D9EEF1; border-color: #BFE3E7; }
+    .tl-cell.has { background: var(--tl-hit); border-color: var(--tl-hit-line); }
     .tl-cell.avail { cursor: pointer; border-color: var(--line); }
     .tl-cell.avail:not(.selected):not(.covered):hover { border-color: var(--accent); background: var(--accent-dim); }
     .tl-cell.covered { background: rgba(15, 155, 168, 0.55); border-color: var(--accent); }
-    .tl-cell.selected { background: var(--accent); border-color: #0B7C87; position: relative; }
+    .tl-cell.selected { background: var(--accent); border-color: var(--accent); position: relative; }
     .tl-cell.selected::after {
         content: "";
         position: absolute; left: 50%; top: 50%;
         width: 6px; height: 6px; border-radius: 50%;
-        background: #FFFFFF;
+        background: var(--on-accent);
         transform: translate(-50%, -50%);
     }
     .tl-scale {
@@ -241,7 +313,7 @@
     .col .seg.missing { background: var(--missing); }
     .col .tip {
         position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%);
-        background: #1B2735; color: #FFFFFF; font-family: var(--sans); font-size: 10px;
+        background: var(--tip-bg); color: var(--tip-text); font-family: var(--sans); font-size: 10px;
         padding: 4px 7px; border-radius: 5px; white-space: nowrap;
         opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 8;
     }
@@ -257,19 +329,17 @@
     .card {
         --c: var(--accent);
         position: relative;
-        background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
-        border: 1px solid var(--line);
+        background: linear-gradient(180deg, var(--card-a) 0%, var(--card-b) 100%);
+        border: 1.5px solid var(--c);
         border-radius: 12px;
         overflow: hidden;
-        transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+        transition: box-shadow 0.15s, transform 0.15s;
     }
     .card:hover {
-        border-color: color-mix(in srgb, var(--c) 35%, var(--line));
-        box-shadow: 0 8px 20px rgba(27, 39, 53, 0.07);
+        box-shadow: 0 8px 22px var(--shadow);
         transform: translateY(-1px);
     }
-    .card .c-accent { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c); }
-    .card .c-body { padding: 10px 12px 11px 15px; }
+    .card .c-body { padding: 10px 12px 11px; }
     .card .c-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
     .card .c-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: 0 0 auto; }
     .card .c-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -292,43 +362,42 @@
         color: var(--dim); text-transform: uppercase; padding: 7px 10px;
         border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--panel2);
     }
-    tbody td { padding: 7px 10px; border-bottom: 1px solid rgba(227, 233, 241, 0.8); font-size: 12px; vertical-align: middle; }
+    tbody td { padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 12px; vertical-align: middle; }
     tbody tr { transition: background 0.12s; }
     tbody tr:hover { background: var(--panel2); }
     tbody tr:last-child td { border-bottom: none; }
-    td.num { font-family: var(--sans); font-variant-numeric: tabular-nums; }
     td .src-name { font-weight: 600; }
     td .add { color: var(--ok); font-family: var(--sans); }
     td .latest { color: var(--muted); font-family: var(--sans); font-size: 11px; }
 
     /* 覆盖带 */
     .coverage { display: inline-flex; gap: 2px; align-items: center; padding: 3px 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; }
-    .coverage i { width: 5px; height: 12px; border-radius: 1px; background: #E5EAF2; transition: background 0.12s, transform 0.12s; display: block; }
+    .coverage i { width: 5px; height: 12px; border-radius: 1px; background: var(--track); transition: background 0.12s, transform 0.12s; display: block; }
     .coverage i.hit { background: var(--accent); opacity: 0.72; }
     .coverage i:hover { transform: scaleY(1.25); background: var(--missing); }
     .coverage-label { font-size: 9px; color: var(--dim); margin-left: 6px; font-family: var(--sans); }
 
     /* 日志终端 */
     .terminal {
-        background: linear-gradient(180deg, #FBFDFF 0%, #F6F9FD 100%);
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        padding: 8px 12px;
+        background: linear-gradient(180deg, var(--term-a) 0%, var(--term-b) 100%);
+        border: 0;
+        border-radius: 0;
+        padding: 4px 14px 12px;
         height: 220px;
         overflow-y: auto;
         font-family: var(--sans);
         font-size: 11.5px;
         line-height: 1.65;
-        color: #3E4C60;
-        font-variant-numeric: tabular-nums;
+        color: var(--log-text);
+        font-variant-numeric: normal;
     }
     .terminal::-webkit-scrollbar { width: 8px; }
     .terminal::-webkit-scrollbar-track { background: transparent; }
-    .terminal::-webkit-scrollbar-thumb { background: #D5DEE9; border-radius: 4px; }
-    .terminal .empty { color: #94A3B8; }
+    .terminal::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
+    .terminal .empty { color: var(--dim); }
     .log-line { display: flex; gap: 7px; align-items: baseline; padding: 1px 0; border-radius: 4px; }
     .log-line:hover { background: rgba(15, 155, 168, 0.05); }
-    .log-line .t { color: var(--dim); font-size: 10px; flex: 0 0 auto; white-space: nowrap; }
+    .log-line .t { color: var(--dim); font-size: 10px; flex: 0 0 auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
     .log-line .lvl {
         flex: 0 0 auto; font-size: 9px; font-weight: 600; letter-spacing: 0.04em;
         border-radius: 4px; padding: 0 4px; min-width: 34px; text-align: center;
@@ -342,20 +411,22 @@
     /* 视频产物 */
     #videoList { max-height: 420px; overflow-y: auto; padding-right: 4px; }
     #videoList::-webkit-scrollbar { width: 8px; }
-    #videoList::-webkit-scrollbar-track { background: #EEF2F7; }
-    #videoList::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+    #videoList::-webkit-scrollbar-track { background: transparent; }
+    #videoList::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 4px; }
     .vgroup { margin-bottom: 14px; }
     .vdate { font-size: 10px; color: var(--dim); margin-bottom: 6px; letter-spacing: 0.1em; }
     .vitem {
         display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
         padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px;
-        margin-bottom: 6px; background: linear-gradient(180deg, #FFFFFF 0%, #FAFCFE 100%);
+        margin-bottom: 6px; background: linear-gradient(180deg, var(--vitem-a) 0%, var(--vitem-b) 100%);
         transition: border-color 0.15s, box-shadow 0.15s;
     }
-    .vitem:hover { border-color: rgba(15, 155, 168, 0.35); box-shadow: 0 4px 14px rgba(27, 39, 53, 0.05); }
+    .vitem:hover { border-color: rgba(15, 155, 168, 0.35); box-shadow: 0 4px 14px var(--shadow); }
     .vmain { flex: 1; min-width: 220px; }
-    .vname { display: block; font-size: 12.5px; font-weight: 600; color: var(--text); }
-    .vmeta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--dim); margin-top: 2px; }
+    .vhead { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 24px; align-items: baseline; }
+    .vname { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vrange { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vmeta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--dim); margin-top: 3px; }
     .vtag {
         font-size: 9px; color: var(--accent); background: var(--accent-dim);
         border-radius: 999px; padding: 1px 7px;
@@ -379,6 +450,7 @@
         .synth-row1 select { width: 100%; }
         .span-row { grid-template-columns: repeat(5, 1fr); }
         .kpis { grid-template-columns: repeat(2, 1fr); }
+        .vhead { grid-template-columns: 1fr; gap: 2px; }
     }
     @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -408,6 +480,15 @@
                 <div class="value" id="uptimeText">00:00:00</div>
             </div>
             <span class="node-state running" id="nodeState"><span class="dot"></span><span id="nodeStateText">采集守护中</span></span>
+            <button class="theme-toggle" id="themeToggle" type="button" title="切换深色模式" aria-label="切换深色或浅色模式">
+                <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M20.2 14.1A8.2 8.2 0 0 1 9.9 3.8a8.2 8.2 0 1 0 10.3 10.3Z"/>
+                </svg>
+                <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4"/>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+                </svg>
+            </button>
         </div>
     </header>
 
@@ -505,6 +586,7 @@
 
 <script>
     const PALETTE = ["#0F9BA8", "#2F6FED", "#0E9F6E", "#D97706", "#7C5CFC", "#EA6A2A", "#DC4C4C", "#0AA5C9", "#4F5BD5", "#D6458C", "#64748B"];
+    const DARK_PALETTE = ["#4DD8E2", "#6C9BFF", "#3BD69B", "#F3A94B", "#A98BFF", "#FF9B6A", "#FF7272", "#4CC9E8", "#8B9BFF", "#F27BB8", "#94A3B8"];
     let uptimeSeconds = 0;
     let currentHours = 12;
     let rangesData = { dates: [] };
@@ -734,18 +816,22 @@
         });
     }
 
+    function currentTheme() {
+        return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    }
+
     function renderCards(records) {
         const grid = document.getElementById("cardGrid");
         grid.innerHTML = "";
+        const palette = currentTheme() === "dark" ? DARK_PALETTE : PALETTE;
         records.forEach((r, i) => {
             const card = document.createElement("div");
             card.className = "card";
-            const color = PALETTE[i % PALETTE.length];
+            const color = palette[i % palette.length];
             const hoursWithData = (r.hourly || []).filter(n => n > 0).length;
             const cov = r.avail_24h > 0 ? Math.round(hoursWithData / 24 * 100) : 0;
             card.style.setProperty("--c", color);
             card.innerHTML = `
-                <span class="c-accent"></span>
                 <div class="c-body">
                     <div class="c-head">
                         <span class="c-dot"></span>
@@ -792,8 +878,8 @@
         ].join("#");
     }
 
-    async function pollStatus() {
-        if (sseActive) return;
+    async function pollStatus(force = false) {
+        if (sseActive && !force) return;
         try {
             const res = await fetch("/api/status");
             applyStatus(await res.json());
@@ -1014,7 +1100,10 @@
                     row.className = "vitem";
                     row.innerHTML = `
                         <div class="vmain">
-                            <span class="vname" title="${v.name}">${v.label || v.name}</span>
+                            <div class="vhead">
+                                <span class="vname" title="${v.name}">${v.label || v.name}</span>
+                                <span class="vrange">${v.time_range || ""}</span>
+                            </div>
                             <span class="vmeta">
                                 <span>${fmtSize(v.size)}</span>
                                 <span>${v.mtime}</span>
@@ -1048,6 +1137,26 @@
     document.getElementById("tlNext").addEventListener("click", () => { dateIdx--; selected = null; renderTimeline(); });
     document.getElementById("tlClear").addEventListener("click", clearSelection);
     document.getElementById("goBtn").addEventListener("click", trigger);
+    function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem("wt-theme", theme); } catch (e) { /* ignore */ }
+        const button = document.getElementById("themeToggle");
+        if (button) {
+            button.title = theme === "dark" ? "切换浅色模式" : "切换深色模式";
+            button.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
+        }
+        lastStatusKey = "";
+        pollStatus(true);
+    }
+
+    function toggleTheme() {
+        const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+        applyTheme(current === "dark" ? "light" : "dark");
+    }
+
+    document.getElementById("themeToggle").addEventListener("click", toggleTheme);
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "dark" : "light");
+
     selectSpan(12);
     loadOptions();
     connectEvents();

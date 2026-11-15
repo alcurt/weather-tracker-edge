@@ -81,10 +81,14 @@ def test_serve_video_missing_file(tmp_path):
     assert target is None
 
 
-def test_video_label_is_human_readable():
-    assert web.video_label("TempC_20261023_0000_to_2359.mp4") == "气温填色图 · 2026-10-23 00:00 → 2026-10-23 23:59"
-    assert (
-        web.video_label("RadarGZ_20261023_2300_to_20261024_0100.mp4")
-        == "广州组合反射率 · 2026-10-23 23:00 → 2026-10-24 01:00"
-    )
+def test_video_label_and_time_range_are_split():
+    same_day = "TempC_20261023_0000_to_2359.mp4"
+    assert web.video_label(same_day) == "气温填色图"
+    assert web.video_time_range(same_day) == "2026-10-23 00:00  →  2026-10-23 23:59"
+
+    cross_day = "RadarGZ_20261023_2300_to_20261024_0100.mp4"
+    assert web.video_label(cross_day) == "广州组合反射率"
+    assert web.video_time_range(cross_day) == "2026-10-23 23:00  →  2026-10-24 01:00"
+
     assert web.video_label("weird.mp4") == "weird.mp4"
+    assert web.video_time_range("weird.mp4") == ""

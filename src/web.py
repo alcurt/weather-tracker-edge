@@ -312,17 +312,28 @@ VIDEO_NAME_RE = re.compile(
 )
 
 
-def video_label(name: str) -> str:
-    """把 FY4C_20261023_0000_to_2359.mp4 转成人类可读标题。"""
+def _video_parts(name: str) -> tuple[str, str] | None:
     match = VIDEO_NAME_RE.match(name)
     if match is None:
-        return name
+        return None
     kind = flat_display_map.get(match.group("kind"), match.group("kind"))
     sd, st = match.group("sd"), match.group("st")
     ed, et = match.group("ed") or sd, match.group("et")
     start = f"{sd[:4]}-{sd[4:6]}-{sd[6:]} {st[:2]}:{st[2:]}"
     end = f"{ed[:4]}-{ed[4:6]}-{ed[6:]} {et[:2]}:{et[2:]}"
-    return f"{kind} · {start} → {end}"
+    return kind, f"{start}  →  {end}"
+
+
+def video_label(name: str) -> str:
+    """信源中文名，例如 风云4C云图。"""
+    parts = _video_parts(name)
+    return parts[0] if parts is not None else name
+
+
+def video_time_range(name: str) -> str:
+    """时间范围，箭头前后各两个不换行空格。"""
+    parts = _video_parts(name)
+    return parts[1] if parts is not None else ""
 
 
 def health_snapshot(state: AppState) -> tuple[int, dict]:
@@ -519,6 +530,7 @@ def build_app(state: AppState) -> FastAPI:
         for group in groups:
             for video in group["videos"]:
                 video["label"] = video_label(video["name"])
+                video["time_range"] = video_time_range(video["name"])
         return {"code": 200, "groups": groups}
 
     @app.get("/videos/{path:path}")
