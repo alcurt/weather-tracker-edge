@@ -103,7 +103,7 @@
 
 #### 3.2 异步并发模型与防卡顿解耦
 
-在 `main.py` 的 ASGI 生命周期管理中，通过 `asyncio.create_task` 派生五个互相隔离、又通过总线通讯的底层守护实体：
+在 `web.py` 的 ASGI 生命周期管理中，通过 `asyncio.create_task` 派生五个互相隔离、又通过总线通讯的底层守护实体：
 
 ```
 [ HTTP/2 Remote Servers ]
@@ -153,7 +153,9 @@ GuangzhouWeatherTracker/
 ├── logs/
 │   └── tracker.log                # 轮转与持久化双写系统日志
 ├── src/
-│   ├── main.py                    # ASGI 服务、内存日志总线、五大协程调度与 HTML 视图
+│   ├── main.py                    # 进程入口：装配应用并启动 Uvicorn
+│   ├── web.py                     # FastAPI app factory、路由、AppState 与后台协程
+│   ├── logbus.py                  # 控制台/轮转文件/WebUI 内存日志三路总线
 │   ├── poller.py                  # 三轨探测器、调度与状态码/宽限期策略
 │   ├── synthesizer.py             # 反向时间轴推演、动态 FPS、防泄漏管道推流
 │   ├── analytics.py               # 24h 聚合、30 分钟时间轴与视频分组（纯逻辑）
@@ -247,7 +249,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 
 开发机（台式机）修改完成后，仅需向笔记本复制以下代码层与文档文件（覆盖同名文件，不触碰 data/ 与 logs/）：
 
-* `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/dashboard.html`
+* `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/web.py`、`src/logbus.py`、`src/dashboard.html`
 * `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/fetch.py`、`src/storage.py`
 * `README.md`、`PRD.md`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
