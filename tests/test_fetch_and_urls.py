@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import TZ_UTC8
-from fetch import is_retryable_status, parse_retry_after, retry_delay
-from poller import build_nmc_url, build_radar_url
+from fetch import SlotProbeCache, is_retryable_status, parse_retry_after, retry_delay
+from poller import build_nmc_url, build_radar_url, slot_is_mature
 
 
 def test_retryable_status_codes():
@@ -46,3 +46,61 @@ def test_radar_url_uses_beijing_time():
 def test_utc_conversion_is_timezone_aware():
     ts = datetime(2026, 1, 1, 3, 0, tzinfo=TZ_UTC8)
     assert ts.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S") == "20251231190000"
+
+
+def test_slot_is_mature():
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=TZ_UTC8)
+    assert slot_is_mature(now, now - timedelta(minutes=6), 6) is True
+    assert slot_is_mature(now, now - timedelta(minutes=5, seconds=59), 6) is False
+    assert slot_is_mature(now, now, 6) is False
+
+
+class FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_probe_cache_backs_off_missing_slots():
+    clock = FakeClock()
+    cache = SlotProbeCache(clock=clock)
+    key = "RadarGZ:20260101_120000"
+
+    assert cache.should_probe(key) is True
+    cache.mark_missing(key)
+    assert cache.should_probe(key) is False
+
+    clock.now += 60
+    assert cache.should_probe(key) is True
+    cache.mark_missing(key)
+    clock.now += 119
+    assert cache.should_probe(key) is False
+    clock.now += 1
+    assert cache.should_probe(key) is True
+    cache.mark_missing(key)
+    clock.now += 239
+    assert cache.should_probe(key) is False
+    clock.now += 1
+    assert cache.should_probe(key) is True
+
+
+def test_probe_cache_success_and_prune_clear_state():
+    clock = FakeClock()
+    cache = SlotProbeCache(clock=clock)
+    key = "FY4C:20260101_120000"
+
+    cache.mark_missing(key)
+    cache.mark_ok(key)
+    assert cache.should_probe(key) is True
+
+    cache.mark_transient(key)
+    assert cache.should_probe(key) is False
+    clock.now += 30
+    assert cache.should_probe(key) is True
+
+    cache.mark_permanent(key)
+    assert cache.should_probe(key) is False
+    cache.prune(set())
+    assert cache.should_probe("FY4C:20260101_120000") is True

@@ -26,7 +26,6 @@ from cleaner import StorageCleaner
 from config import DATA_DIR, TZ_UTC8
 from download_stats import download_stats
 from poller import AsyncPoller
-from storage import atomic_write_json
 from synthesizer import Synthesizer
 
 # ==========================================
@@ -127,7 +126,6 @@ all_target_keys = list(flat_display_map.keys())
 
 # 每日 00:15 昨日总结排除的信源（四个 B 类分布图取消；FY4C 纳入定时任务）
 CRON_EXCLUDED_TYPES = {"TempB", "RainB", "Rain24hB", "WindB"}
-CRON_STATE_FILE = DATA_DIR / "state" / "cron.json"
 
 SUPPORTED_HOURS = (1, 3, 6, 12, 24)
 
@@ -137,39 +135,16 @@ def get_dynamic_fps(hours: int) -> float:
     return FPS_BY_HOURS.get(hours, 10.0)
 
 
-def _load_cron_state() -> dict:
-    try:
-        with open(CRON_STATE_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+def cron_due(now: datetime, started_at: datetime, last_triggered_date) -> bool:
+    """该分钟是否应触发昨日总结。
 
-
-def _save_cron_state(target_date: str) -> None:
-    atomic_write_json(
-        CRON_STATE_FILE,
-        {
-            "last_done_date": target_date,
-            "updated_at": datetime.now(TZ_UTC8).isoformat(),
-        },
-    )
-
-
-def cron_target(now: datetime, last_done: str) -> str | None:
-    """返回需要补跑的昨日日期；None 表示本轮不触发。
-
-    00:15 之前不触发，给 23:xx 的最后一帧留出抓取窗口；last_done 晚于目标
-    （时钟回拨）时也跳过，避免重复合成。
+    只有进程在当日 00:15 之前已经启动、且跨过 00:15 时才触发；
+    启动时已过 00:15 则当天不补跑，符合"启动不补历史定时任务"的约定。
     """
-    if not (now.hour > 0 or now.minute >= 15):
-        return None
-    target_date = (now - timedelta(days=1)).strftime("%Y%m%d")
-    if last_done == target_date:
-        return None
-    if last_done and last_done > target_date:
-        return None
-    return target_date
+    boundary = now.replace(hour=0, minute=15, second=0, microsecond=0)
+    if boundary <= started_at or now < boundary:
+        return False
+    return last_triggered_date != now.date()
 
 # ==========================================
 # 后台异步守护协程 (元数据门铃监听)
@@ -289,20 +264,15 @@ async def gc_loop():
             await asyncio.sleep(300)
 
 async def cron_loop():
-    """每日 00:15 之后触发昨日总结；状态落盘，启动后可补跑最近一天。"""
+    """每日 00:15 且进程已在线跨过该时刻时触发昨日总结；启动时不补跑历史任务。"""
+    started_at = datetime.now(TZ_UTC8)
+    last_triggered_date = None
     while True:
         try:
             now = datetime.now(TZ_UTC8)
-            state = await asyncio.to_thread(_load_cron_state)
-            last_done = str(state.get("last_done_date") or "")
-            target_date = cron_target(now, last_done)
-            if target_date:
-                if not last_done:
-                    logger.info("[Cron] 未找到任务状态，补跑昨日总结。")
-                elif last_done < (now - timedelta(days=2)).strftime("%Y%m%d"):
-                    logger.warning(
-                        f"[Cron] 上次完成日期为 {last_done}，仅补跑最近一天 {target_date}。"
-                    )
+            if cron_due(now, started_at, last_triggered_date):
+                # 先占位：即使后续队列处理失败，也不会在同一天重复触发
+                last_triggered_date = now.date()
                 tasks = [
                     (k, v) for k, v in flat_display_map.items()
                     if k not in CRON_EXCLUDED_TYPES
@@ -315,10 +285,8 @@ async def cron_loop():
                         "hours": 24,
                         "is_cron": True
                     })
-                # 等全部任务完成再标记，崩溃则下次启动重跑（重复写入同一文件名，幂等）
                 await SYNTH_QUEUE.join()
-                await asyncio.to_thread(_save_cron_state, target_date)
-                logger.info(f"[Cron] 昨日总结已全部完成，状态写入 {target_date}。")
+                logger.info("昨日总结已全部完成。")
         except asyncio.CancelledError:
             raise
         except Exception as e:

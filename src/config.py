@@ -49,6 +49,14 @@ RADAR_TYPES = {
 # 雷达图动态解析 URL 模板
 RADAR_URL_TEMPLATE = "http://www.tqyb.com.cn/data/swan/mcr/{date_str}/{upstream_time_str}_{suffix}.png"
 
+RADAR_INTERVAL_MINUTES = 6        # 雷达图固定刷新间隔
+RADAR_POLL_WINDOW_HOURS = 1       # 常规轮询回看窗口（抓取新鲜度）
+RADAR_BACKFILL_HOURS = 6          # 启动/周期缺口回补窗口（上游保留 >=24h）
+RADAR_BACKFILL_INTERVAL_MINUTES = 30  # 缺口回补周期
+RADAR_FETCH_CONCURRENCY = 8       # 单轮雷达抓取并发上限
+RADAR_PENDING_GRACE_MINUTES = 20  # 超过该年龄仍 404 才计入"上游缺失"
+RADAR_MIN_AGE_MINUTES = 6         # 时次至少成熟 6 分钟才探测，避免发布前必然 404
+
 # ==========================================
 # 中央气象台卫星云图 (FY4C) 配置
 # ==========================================
@@ -69,3 +77,6 @@ NMC_POLL_WINDOW_HOURS = 4      # 常规轮询滑动窗口（小时）
 NMC_BACKFILL_BATCH_SIZE = 18   # 回补每批并发时次数
 NMC_BACKFILL_CONCURRENCY = 8   # 回补全局并发上限
 NMC_BATCH_PAUSE_SECONDS = 1.0  # 批间停顿，避免压垮上游 CDN
+NMC_PENDING_GRACE_MINUTES = 40  # 超过该年龄仍 404 才计入"上游缺失"
+NMC_BACKFILL_RECENT_HOURS = 4   # 本地最新帧在该窗口内则跳过启动全量回补
+NMC_MIN_AGE_MINUTES = 10        # 时次至少成熟 10 分钟才探测，避免发布前必然 404

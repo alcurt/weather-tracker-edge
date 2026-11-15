@@ -12,6 +12,7 @@ import aiofiles
 import httpx
 from PIL import Image
 
+from analytics import parse_frame_timestamp
 from config import (
     BASE_TIMEOUT,
     CONNECTION_RECYCLE_SECONDS,
@@ -21,17 +22,27 @@ from config import (
     NMC_BACKFILL_BATCH_SIZE,
     NMC_BACKFILL_CONCURRENCY,
     NMC_BACKFILL_DAYS,
+    NMC_BACKFILL_RECENT_HOURS,
     NMC_BATCH_PAUSE_SECONDS,
+    NMC_MIN_AGE_MINUTES,
+    NMC_PENDING_GRACE_MINUTES,
     NMC_POLL_WINDOW_HOURS,
     NMC_SATELLITE_TYPES,
     POLL_INTERVAL,
+    RADAR_BACKFILL_HOURS,
+    RADAR_BACKFILL_INTERVAL_MINUTES,
+    RADAR_FETCH_CONCURRENCY,
+    RADAR_INTERVAL_MINUTES,
+    RADAR_MIN_AGE_MINUTES,
+    RADAR_PENDING_GRACE_MINUTES,
+    RADAR_POLL_WINDOW_HOURS,
     RADAR_TYPES,
     RADAR_URL_TEMPLATE,
     TARGET_URLS,
     TZ_UTC8,
 )
 from download_stats import download_stats
-from fetch import is_retryable_status, retry_delay
+from fetch import SlotProbeCache, is_retryable_status, retry_delay
 from storage import atomic_write_bytes_async
 
 logger = logging.getLogger(__name__)
@@ -44,6 +55,11 @@ def build_radar_url(radar_type: str, target_time: datetime) -> str:
         upstream_time_str=target_time.strftime("%Y%m%d%H%M00"),
         suffix=RADAR_TYPES[radar_type],
     )
+
+
+def slot_is_mature(now: datetime, target_time: datetime, min_age_minutes: int) -> bool:
+    """时次是否已过最小成熟期；未成熟时上游通常尚未发布，探测必然是 404。"""
+    return now - target_time >= timedelta(minutes=min_age_minutes)
 
 
 def build_nmc_url(img_type: str, target_time: datetime) -> str:
@@ -106,6 +122,7 @@ class AsyncPoller:
         self._tasks: list[asyncio.Task] = []
         self._retire_tasks: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
+        self.probes = SlotProbeCache()
 
         # 核心新增：轻量化共享指标矩阵，为无头节点维护观测链路
         self.metrics = {
@@ -170,22 +187,48 @@ class AsyncPoller:
         item_keys: list = None,
         count_missing: bool = True,
         count_fail: bool = True,
+        pending_grace_minutes: int | None = None,
+        now: datetime | None = None,
     ):
         """把一轮采集的结果码归类写入下载统计（304/EXIST 不计数）。
 
         404 按 (信源, 时次) 去重计入 missing；回补等历史扫描可关闭
         count_missing/count_fail 只计成功落盘，避免重启导致计数虚高。
+
+        时间网格信源在发布前必然 404，因此给出 pending_grace_minutes：
+        时次年龄小于该宽限期时不记 missing，避免把"尚未发布"永久计成"上游缺失"。
         """
+        current = now or datetime.now(TZ_UTC8)
         for i, r in enumerate(results):
             if r == "200":
                 download_stats.record("ok")
             elif r == "404":
-                if count_missing:
-                    key = item_keys[i] if item_keys and i < len(item_keys) and item_keys[i] else "static"
-                    download_stats.record_missing(img_type, key)
+                if not count_missing:
+                    continue
+                key = item_keys[i] if item_keys and i < len(item_keys) and item_keys[i] else "static"
+                if pending_grace_minutes and key != "static":
+                    slot_ts = parse_frame_timestamp(key)
+                    if slot_ts is not None and current - slot_ts < timedelta(minutes=pending_grace_minutes):
+                        continue
+                download_stats.record_missing(img_type, key)
             elif r in ("FETCH_ERR", "CRASH", "ERROR", "TIMEOUT"):
                 if count_fail:
                     download_stats.record("fail")
+
+    @staticmethod
+    def _probe_key(source: str, target_time: datetime) -> str:
+        return f"{source}:{target_time.strftime('%Y%m%d_%H%M%S')}"
+
+    def _mark_probe_results(self, pairs: list, results: list) -> None:
+        for (_, key), result in zip(pairs, results, strict=False):
+            if result in ("200", "EXIST"):
+                self.probes.mark_ok(key)
+            elif result == "404":
+                self.probes.mark_missing(key)
+            elif result == "ERROR":
+                self.probes.mark_permanent(key)
+            else:
+                self.probes.mark_transient(key)
 
     async def _fetch_single_radar(self, radar_type: str, target_time: datetime) -> str:
         """抓取单个时刻雷达图：内置坏图免疫与断点续传校验"""
@@ -255,31 +298,99 @@ class AsyncPoller:
                 return "CRASH"
         return "TIMEOUT"
 
+    async def _backfill_radar_source(self, radar_type: str, now: datetime) -> None:
+        """扫描最近数小时的雷达缺口，自愈超过常规窗口的断网。"""
+        slot_count = int(RADAR_BACKFILL_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
+        base_time = now.replace(
+            minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
+            second=0,
+            microsecond=0,
+        )
+        pairs = [
+            (target_time, self._probe_key(radar_type, target_time))
+            for target_time in (
+                base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
+                for i in range(slot_count)
+            )
+            if slot_is_mature(now, target_time, RADAR_MIN_AGE_MINUTES)
+        ]
+        semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
+
+        async def fetch_one(target_time: datetime) -> str:
+            async with semaphore:
+                return await self._fetch_single_radar(radar_type, target_time)
+
+        results = await asyncio.gather(*[fetch_one(t) for t, _ in pairs])
+        self._record_download_results(
+            radar_type, results,
+            item_keys=[key for _, key in pairs],
+            count_missing=False, count_fail=False,
+        )
+        self._mark_probe_results(pairs, results)
+
+        counts = {"200": 0, "EXIST": 0, "404": 0, "FAIL": 0}
+        for result in results:
+            counts[result if result in ("200", "EXIST", "404") else "FAIL"] += 1
+        if counts["200"] or counts["FAIL"]:
+            logger.info(
+                f"[{radar_type}] 缺口回补完成：新增 {counts['200']} 张，"
+                f"已存在 {counts['EXIST']} 张，上游缺失 {counts['404']} 个时次，失败 {counts['FAIL']} 个。"
+            )
+
     async def _loop_radar_source(self, radar_type: str):
-        """雷达图专属独立协程：彻底消除多路会话线头阻塞"""
+        """雷达图专属独立协程：滑动窗口 + 周期缺口回补"""
         logger.info(f"[{radar_type}] 独立滑动窗口监听线程启动...")
+        last_backfill = 0.0
         while True:
             start_time = time.time()
-            status_summary = "304" # 默认若无实际落盘则定义为无变更状态
-            
+            status_summary = "304"  # 默认若无实际落盘则定义为无变更状态
+
             try:
                 await self._ensure_client()
                 now = datetime.now(TZ_UTC8)
-                current_minute = (now.minute // 6) * 6
-                base_time = now.replace(minute=current_minute, second=0, microsecond=0)
-                
-                target_times = []
-                tasks = []
-                for i in range(11):
-                    target_time = base_time - timedelta(minutes=6 * i)
-                    target_times.append(target_time)
-                    tasks.append(self._fetch_single_radar(radar_type, target_time))
-                
-                results = await asyncio.gather(*tasks)
-                self._record_download_results(
-                    radar_type, results,
-                    item_keys=[t.strftime("%Y%m%d_%H%M%S") for t in target_times],
+
+                # 启动即回补最近数小时缺口，之后每 30 分钟补漏一次
+                if time.time() - last_backfill >= RADAR_BACKFILL_INTERVAL_MINUTES * 60:
+                    await self._backfill_radar_source(radar_type, now)
+                    last_backfill = time.time()
+
+                base_time = now.replace(
+                    minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
+                    second=0,
+                    microsecond=0,
                 )
+                slot_count = int(RADAR_POLL_WINDOW_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
+                pairs = [
+                    (target_time, self._probe_key(radar_type, target_time))
+                    for target_time in (
+                        base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
+                        for i in range(slot_count)
+                    )
+                ]
+                self.probes.prune({key for _, key in pairs})
+                pending = [
+                    (t, key) for t, key in pairs
+                    if slot_is_mature(now, t, RADAR_MIN_AGE_MINUTES) and self.probes.should_probe(key)
+                ]
+
+                results = []
+                if pending:
+                    semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
+
+                    async def fetch_one(
+                        target_time: datetime, sem: asyncio.Semaphore = semaphore
+                    ) -> str:
+                        async with sem:
+                            return await self._fetch_single_radar(radar_type, target_time)
+
+                    results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
+                    self._record_download_results(
+                        radar_type, results,
+                        item_keys=[key for _, key in pending],
+                        pending_grace_minutes=RADAR_PENDING_GRACE_MINUTES,
+                    )
+                    self._mark_probe_results(pending, results)
+
                 if "200" in results:
                     status_summary = "200"
                 elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
@@ -287,7 +398,7 @@ class AsyncPoller:
             except Exception as e:
                 logger.error(f"[{radar_type}] 轮询异常 (隔离不扩散): {e}")
                 status_summary = "CRASH"
-                
+
             elapsed = time.time() - start_time
             # 增量推送当前信源指标
             self.metrics[radar_type] = {
@@ -362,12 +473,40 @@ class AsyncPoller:
                 return "CRASH"
         return "TIMEOUT"
 
+    def _has_recent_frames(self, img_type: str, now: datetime, hours: int) -> bool:
+        """判断本地是否已有最近 N 小时的帧，用于跳过启动时的全量回补。"""
+        cutoff = now - timedelta(hours=hours)
+        type_dir = DATA_DIR / img_type
+        for days_back in (0, 1):
+            date_dir = type_dir / (now - timedelta(days=days_back)).strftime("%Y%m%d")
+            if not date_dir.is_dir():
+                continue
+            try:
+                with os.scandir(date_dir) as entries:
+                    for entry in entries:
+                        if not entry.name.endswith(".png"):
+                            continue
+                        ts = parse_frame_timestamp(entry.name)
+                        if ts is not None and ts >= cutoff:
+                            return True
+            except OSError:
+                continue
+        return False
+
     async def _backfill_nmc_source(self, img_type: str):
         """首次接入回补扫描：按时间网格枚举最近 N 天理论时次，分批并发抓取"""
         cfg = NMC_SATELLITE_TYPES[img_type]
         step_minutes = cfg["interval_minutes"]
         step = timedelta(minutes=step_minutes)
         now = datetime.now(TZ_UTC8)
+
+        # 常规重启时最近窗口已有数据，无需每次重扫 3 天（约 430 个时次）
+        if self._has_recent_frames(img_type, now, NMC_BACKFILL_RECENT_HOURS):
+            logger.info(
+                f"[{img_type}] 最近 {NMC_BACKFILL_RECENT_HOURS} 小时已有本地帧，跳过启动全量回补。"
+            )
+            return
+
         base_time = now.replace(minute=(now.minute // step_minutes) * step_minutes, second=0, microsecond=0)
         end_time = base_time - timedelta(days=NMC_BACKFILL_DAYS)
 
@@ -376,6 +515,7 @@ class AsyncPoller:
         while t >= end_time:
             slots.append(t)
             t -= step
+        slots = [t for t in slots if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES)]
 
         logger.info(
             f"[{img_type}] 开始首次回补扫描：{len(slots)} 个理论时次"
@@ -391,12 +531,14 @@ class AsyncPoller:
         for i in range(0, len(slots), NMC_BACKFILL_BATCH_SIZE):
             await self._ensure_client()
             batch = slots[i:i + NMC_BACKFILL_BATCH_SIZE]
+            pairs = [(t, self._probe_key(img_type, t)) for t in batch]
             results = await asyncio.gather(*[fetch_one(t) for t in batch])
             self._record_download_results(
                 img_type, results,
-                item_keys=[t.strftime("%Y%m%d_%H%M%S") for t in batch],
+                item_keys=[key for _, key in pairs],
                 count_missing=False, count_fail=False,
             )
+            self._mark_probe_results(pairs, results)
             for r in results:
                 counts[r if r in ("200", "EXIST", "404") else "FAIL"] += 1
             if i + NMC_BACKFILL_BATCH_SIZE < len(slots):
@@ -425,13 +567,37 @@ class AsyncPoller:
                 base_time = now.replace(minute=(now.minute // step_minutes) * step_minutes, second=0, microsecond=0)
 
                 slot_count = int(NMC_POLL_WINDOW_HOURS * 60 / step_minutes)
-                target_times = [base_time - timedelta(minutes=step_minutes * i) for i in range(slot_count)]
-                tasks = [self._fetch_single_nmc(img_type, t) for t in target_times]
-                results = await asyncio.gather(*tasks)
-                self._record_download_results(
-                    img_type, results,
-                    item_keys=[t.strftime("%Y%m%d_%H%M%S") for t in target_times],
-                )
+                pairs = [
+                    (target_time, self._probe_key(img_type, target_time))
+                    for target_time in (
+                        base_time - timedelta(minutes=step_minutes * i)
+                        for i in range(slot_count)
+                    )
+                ]
+                self.probes.prune({key for _, key in pairs})
+                pending = [
+                    (t, key) for t, key in pairs
+                    if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES) and self.probes.should_probe(key)
+                ]
+
+                results = []
+                if pending:
+                    semaphore = asyncio.Semaphore(NMC_BACKFILL_CONCURRENCY)
+
+                    async def fetch_one(
+                        target_time: datetime, sem: asyncio.Semaphore = semaphore
+                    ) -> str:
+                        async with sem:
+                            return await self._fetch_single_nmc(img_type, target_time)
+
+                    results = await asyncio.gather(*[fetch_one(t) for t, _ in pending])
+                    self._record_download_results(
+                        img_type, results,
+                        item_keys=[key for _, key in pending],
+                        pending_grace_minutes=NMC_PENDING_GRACE_MINUTES,
+                    )
+                    self._mark_probe_results(pending, results)
+
                 if "200" in results:
                     status_summary = "200"
                 elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):

@@ -454,6 +454,8 @@
     let selected = null;  // { date_str, index }
     let videosSignature = "";
     let rangesMessage = "";
+    let lastStatusKey = "";
+    let lastUptime = -1;
 
     function fmtUptime(sec) {
         const d = Math.floor(sec / 86400);
@@ -710,6 +712,20 @@
         return cov;
     }
 
+    function statusKey(data) {
+        const d = data.downloads || {};
+        const totals = d.totals || {};
+        const hours = (d.hours || []).map(h => `${h.key}:${h.ok}:${h.fail}:${h.missing}`).join("|");
+        return [
+            data.stats.last_updated,
+            data.synth.message,
+            data.synth.type,
+            data.synth.is_running,
+            totals.ok, totals.fail, totals.missing,
+            hours
+        ].join("#");
+    }
+
     async function pollStatus() {
         try {
             const res = await fetch("/api/status");
@@ -717,7 +733,13 @@
             if (data.stats.uptime !== undefined) {
                 uptimeSeconds = data.stats.uptime;
                 document.getElementById("uptimeText").textContent = fmtUptime(uptimeSeconds);
+                // 服务重启后 uptime 归零，强制重建一次，避免沿用旧 DOM
+                if (uptimeSeconds < lastUptime) lastStatusKey = "";
+                lastUptime = uptimeSeconds;
             }
+            const key = statusKey(data);
+            if (key === lastStatusKey) return;
+            lastStatusKey = key;
             renderDownloads(data.downloads);
             renderCards(data.stats.records);
             document.getElementById("kpiSources").textContent = data.stats.records.length;

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 import main
 from config import TZ_UTC8
@@ -18,34 +18,24 @@ def test_parse_start_time_uses_beijing_timezone():
     assert parsed == datetime(2026, 1, 1, 23, 30, tzinfo=TZ_UTC8)
 
 
-def test_cron_target_waits_until_quarter_past_midnight():
-    now = datetime(2026, 1, 2, 0, 10, tzinfo=TZ_UTC8)
-    assert main.cron_target(now, "20260101") is None
+def test_cron_due_requires_process_running_before_boundary():
+    started = datetime(2026, 1, 2, 0, 10, tzinfo=TZ_UTC8)
+    # 00:15 之前不触发
+    assert main.cron_due(datetime(2026, 1, 2, 0, 14, tzinfo=TZ_UTC8), started, None) is False
+    # 跨过 00:15 触发一次
+    assert main.cron_due(datetime(2026, 1, 2, 0, 15, tzinfo=TZ_UTC8), started, None) is True
+    assert main.cron_due(datetime(2026, 1, 2, 0, 15, tzinfo=TZ_UTC8), started, date(2026, 1, 2)) is False
+    # 当天晚些时候仍只触发一次
+    assert main.cron_due(datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8), started, date(2026, 1, 2)) is False
 
 
-def test_cron_target_skips_when_yesterday_already_done():
-    now = datetime(2026, 1, 2, 0, 20, tzinfo=TZ_UTC8)
-    assert main.cron_target(now, "20260101") is None
-
-
-def test_cron_target_catches_up_missed_day():
-    now = datetime(2026, 1, 2, 0, 20, tzinfo=TZ_UTC8)
-    assert main.cron_target(now, "20251231") == "20260101"
-    assert main.cron_target(now, "") == "20260101"
-
-
-def test_cron_target_ignores_future_state():
-    now = datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8)
-    assert main.cron_target(now, "20260105") is None
-
-
-def test_cron_state_round_trip(tmp_path, monkeypatch):
-    state_file = tmp_path / "cron.json"
-    monkeypatch.setattr(main, "CRON_STATE_FILE", state_file)
-    assert main._load_cron_state() == {}
-
-    main._save_cron_state("20260101")
-    assert main._load_cron_state()["last_done_date"] == "20260101"
+def test_cron_due_skips_when_started_after_boundary():
+    # 00:16 才启动，当天不补跑
+    started = datetime(2026, 1, 2, 0, 16, tzinfo=TZ_UTC8)
+    assert main.cron_due(datetime(2026, 1, 2, 0, 17, tzinfo=TZ_UTC8), started, None) is False
+    assert main.cron_due(datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8), started, None) is False
+    # 次日 00:15 可以触发
+    assert main.cron_due(datetime(2026, 1, 3, 0, 15, tzinfo=TZ_UTC8), started, None) is True
 
 
 def test_collect_stats_ignores_part_files(tmp_path, monkeypatch):
