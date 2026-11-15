@@ -25,6 +25,9 @@ uv run ruff check .         # 静态检查
 uv run pytest               # 单元测试；本机有 ffmpeg.exe 时会额外跑一次合成集成测试
 ```
 
+若本机 uv 配置的 PyPI 镜像暂时不可用（例如返回 403），可加 `--frozen` 跳过索引重新解析：
+`uv run --frozen pytest`。
+
 测试不访问网络，也不需要真实的 `data/` 数据；CI 在 Windows runner 上执行同样的命令。
 
 
