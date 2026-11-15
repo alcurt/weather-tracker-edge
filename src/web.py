@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -306,6 +307,24 @@ def resolve_video_path(path: str, data_dir: Path) -> tuple[int, Path | None]:
     return 200, Path(target)
 
 
+VIDEO_NAME_RE = re.compile(
+    r"^(?P<kind>.+?)_(?P<sd>\d{8})_(?P<st>\d{4})_to_(?:(?P<ed>\d{8})_)?(?P<et>\d{4})\.mp4$"
+)
+
+
+def video_label(name: str) -> str:
+    """把 FY4C_20261023_0000_to_2359.mp4 转成人类可读标题。"""
+    match = VIDEO_NAME_RE.match(name)
+    if match is None:
+        return name
+    kind = flat_display_map.get(match.group("kind"), match.group("kind"))
+    sd, st = match.group("sd"), match.group("st")
+    ed, et = match.group("ed") or sd, match.group("et")
+    start = f"{sd[:4]}-{sd[4:6]}-{sd[6:]} {st[:2]}:{st[2:]}"
+    end = f"{ed[:4]}-{ed[4:6]}-{ed[6:]} {et[:2]}:{et[2:]}"
+    return f"{kind} · {start} → {end}"
+
+
 def health_snapshot(state: AppState) -> tuple[int, dict]:
     """返回 (HTTP 状态码, 健康快照)。
 
@@ -497,6 +516,9 @@ def build_app(state: AppState) -> FastAPI:
     @app.get("/api/videos")
     async def get_videos():
         groups = await asyncio.to_thread(scan_videos, state.data_dir / "output")
+        for group in groups:
+            for video in group["videos"]:
+                video["label"] = video_label(video["name"])
         return {"code": 200, "groups": groups}
 
     @app.get("/videos/{path:path}")

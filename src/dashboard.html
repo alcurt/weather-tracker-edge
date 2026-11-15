@@ -18,7 +18,6 @@
         --ok: #0E9F6E;
         --fail: #E05252;
         --missing: #D97706;
-        --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
         --sans: "Google Sans Flex", "Noto Sans SC", "Noto Sans", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -54,7 +53,7 @@
     .mast-right { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
     .clock { text-align: right; }
     .clock .label { font-size: 9px; color: var(--dim); letter-spacing: 0.16em; }
-    .clock .value { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+    .clock .value { font-family: var(--sans); font-size: 18px; font-variant-numeric: tabular-nums; }
     .node-state {
         display: inline-flex; align-items: center; gap: 7px;
         font-size: 11px; color: var(--muted);
@@ -93,7 +92,7 @@
         border-radius: 7px;
         padding: 6px 12px;
         font-size: 12px;
-        font-family: var(--mono);
+        font-family: var(--sans);
         cursor: pointer;
         transition: border-color 0.15s, color 0.15s, background 0.15s;
     }
@@ -155,7 +154,7 @@
     }
     .tl-nav-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
     .tl-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .tl-date { font-family: var(--mono); font-size: 12px; color: var(--text); flex: 1; text-align: center; }
+    .tl-date { font-family: var(--sans); font-size: 12px; color: var(--text); flex: 1; text-align: center; }
     .tl-clear {
         border: 1px solid var(--line); background: var(--panel2); color: var(--missing);
         border-radius: 7px; padding: 4px 8px; font-size: 11px; cursor: pointer;
@@ -190,11 +189,11 @@
     }
     .tl-scale {
         display: flex; justify-content: space-between;
-        font-size: 9px; color: var(--dim); font-family: var(--mono); margin-top: 4px;
+        font-size: 9px; color: var(--dim); font-family: var(--sans); margin-top: 4px;
     }
     .range-line {
         display: flex; align-items: center; gap: 6px;
-        font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 8px;
+        font-family: var(--sans); font-size: 12px; color: var(--muted); margin-top: 8px;
     }
     .range-line b { color: var(--accent); font-weight: 600; }
 
@@ -204,7 +203,7 @@
     .job-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
     .job-item .jname { flex: 0 1 240px; min-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .job-item .jstate {
-        font-family: var(--mono); font-size: 10px; padding: 1px 5px;
+        font-family: var(--sans); font-size: 10px; padding: 1px 5px;
         border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
     }
     .job-item.running .jstate { color: var(--missing); border-color: rgba(217, 119, 6, 0.4); }
@@ -212,7 +211,7 @@
     .job-item.failed .jstate { color: var(--fail); border-color: rgba(224, 82, 82, 0.4); }
     .job-item .jbar { flex: 1 1 90px; height: 4px; background: var(--panel2); border-radius: 2px; overflow: hidden; }
     .job-item .jbar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
-    .job-item .jmeta { font-family: var(--mono); font-size: 10px; color: var(--dim); min-width: 64px; text-align: right; }
+    .job-item .jmeta { font-family: var(--sans); font-size: 10px; color: var(--dim); min-width: 64px; text-align: right; }
     .job-item .jlink { font-size: 10px; color: var(--accent); text-decoration: none; }
 
     /* 中部双栏 */
@@ -223,7 +222,7 @@
     .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
     .kpi { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
     .kpi .l { font-size: 9px; color: var(--dim); letter-spacing: 0.1em; }
-    .kpi .v { font-family: var(--mono); font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
+    .kpi .v { font-family: var(--sans); font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
     .kpi.ok .v { color: var(--ok); }
     .kpi.fail .v { color: var(--fail); }
     .kpi.missing .v { color: var(--missing); }
@@ -242,25 +241,49 @@
     .col .seg.missing { background: var(--missing); }
     .col .tip {
         position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%);
-        background: #1B2735; color: #FFFFFF; font-family: var(--mono); font-size: 10px;
+        background: #1B2735; color: #FFFFFF; font-family: var(--sans); font-size: 10px;
         padding: 4px 7px; border-radius: 5px; white-space: nowrap;
         opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 8;
     }
     .col.tip-left .tip { left: 0; transform: none; }
     .col.tip-right .tip { left: auto; right: 0; transform: none; }
     .col:hover .tip { opacity: 1; }
-    .chart-axis { display: flex; justify-content: space-between; font-size: 9px; color: var(--dim); font-family: var(--mono); margin-top: 4px; }
+    .chart-axis { display: flex; justify-content: space-between; font-size: 9px; color: var(--dim); font-family: var(--sans); margin-top: 4px; }
     .legend { display: flex; gap: 12px; margin-top: 7px; font-size: 10px; color: var(--muted); }
     .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 
     /* 落盘统计卡片 */
-    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; }
-    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-    .card .c-body { padding: 7px 9px 8px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: 10px; }
+    .card {
+        --c: var(--accent);
+        position: relative;
+        background: linear-gradient(180deg, #FFFFFF 0%, #FBFDFF 100%);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+        transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+    }
+    .card:hover {
+        border-color: color-mix(in srgb, var(--c) 35%, var(--line));
+        box-shadow: 0 8px 20px rgba(27, 39, 53, 0.07);
+        transform: translateY(-1px);
+    }
+    .card .c-accent { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c); }
+    .card .c-body { padding: 10px 12px 11px 15px; }
+    .card .c-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .card .c-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c); flex: 0 0 auto; }
     .card .c-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .card .c-num { font-family: var(--mono); font-size: 19px; font-weight: 600; margin: 2px 0 1px; font-variant-numeric: tabular-nums; }
-    .card .c-meta { font-size: 10px; color: var(--dim); font-family: var(--mono); }
-    .card .c-key { display: inline-block; font-family: var(--mono); font-size: 9px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; margin-top: 4px; color: var(--muted); }
+    .card .c-key {
+        margin-left: auto; flex: 0 0 auto;
+        font-size: 9px; color: var(--dim);
+        background: var(--panel2); border: 1px solid var(--line);
+        border-radius: 999px; padding: 1px 6px;
+    }
+    .card .c-num { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 4px 0 1px; font-variant-numeric: tabular-nums; color: var(--c); }
+    .card .c-unit { font-size: 10px; font-weight: 500; color: var(--dim); margin-left: 2px; }
+    .card .c-line { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--dim); }
+    .card .c-bar { height: 3px; background: var(--panel2); border-radius: 2px; overflow: hidden; margin: 7px 0 5px; }
+    .card .c-bar i { display: block; height: 100%; border-radius: 2px; background: var(--c); opacity: 0.85; }
 
     /* 状态表 */
     table { width: 100%; border-collapse: collapse; }
@@ -273,58 +296,75 @@
     tbody tr { transition: background 0.12s; }
     tbody tr:hover { background: var(--panel2); }
     tbody tr:last-child td { border-bottom: none; }
-    td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    td.num { font-family: var(--sans); font-variant-numeric: tabular-nums; }
     td .src-name { font-weight: 600; }
-    td .add { color: var(--ok); font-family: var(--mono); }
-    td .latest { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+    td .add { color: var(--ok); font-family: var(--sans); }
+    td .latest { color: var(--muted); font-family: var(--sans); font-size: 11px; }
 
     /* 覆盖带 */
     .coverage { display: inline-flex; gap: 2px; align-items: center; padding: 3px 4px; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; }
     .coverage i { width: 5px; height: 12px; border-radius: 1px; background: #E5EAF2; transition: background 0.12s, transform 0.12s; display: block; }
     .coverage i.hit { background: var(--accent); opacity: 0.72; }
     .coverage i:hover { transform: scaleY(1.25); background: var(--missing); }
-    .coverage-label { font-size: 9px; color: var(--dim); margin-left: 6px; font-family: var(--mono); }
+    .coverage-label { font-size: 9px; color: var(--dim); margin-left: 6px; font-family: var(--sans); }
 
     /* 日志终端 */
     .terminal {
-        background: #F8FAFC;
+        background: linear-gradient(180deg, #FBFDFF 0%, #F6F9FD 100%);
         border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 10px 12px;
-        height: 210px;
+        border-radius: 12px;
+        padding: 8px 12px;
+        height: 220px;
         overflow-y: auto;
-        font-family: var(--mono);
-        font-size: 11px;
-        line-height: 1.6;
-        color: #334155;
-        white-space: pre-wrap;
-        word-break: break-all;
+        font-family: var(--sans);
+        font-size: 11.5px;
+        line-height: 1.65;
+        color: #3E4C60;
+        font-variant-numeric: tabular-nums;
     }
     .terminal::-webkit-scrollbar { width: 8px; }
-    .terminal::-webkit-scrollbar-track { background: #EEF2F7; }
-    .terminal::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+    .terminal::-webkit-scrollbar-track { background: transparent; }
+    .terminal::-webkit-scrollbar-thumb { background: #D5DEE9; border-radius: 4px; }
     .terminal .empty { color: #94A3B8; }
+    .log-line { display: flex; gap: 7px; align-items: baseline; padding: 1px 0; border-radius: 4px; }
+    .log-line:hover { background: rgba(15, 155, 168, 0.05); }
+    .log-line .t { color: var(--dim); font-size: 10px; flex: 0 0 auto; white-space: nowrap; }
+    .log-line .lvl {
+        flex: 0 0 auto; font-size: 9px; font-weight: 600; letter-spacing: 0.04em;
+        border-radius: 4px; padding: 0 4px; min-width: 34px; text-align: center;
+        background: var(--panel2); color: var(--muted); border: 1px solid var(--line);
+    }
+    .log-line.lvl-INFO .lvl { color: var(--accent); border-color: rgba(15, 155, 168, 0.25); background: rgba(15, 155, 168, 0.07); }
+    .log-line.lvl-WARNING .lvl { color: var(--missing); border-color: rgba(217, 119, 6, 0.3); background: rgba(217, 119, 6, 0.08); }
+    .log-line.lvl-ERROR .lvl { color: var(--fail); border-color: rgba(224, 82, 82, 0.3); background: rgba(224, 82, 82, 0.08); }
+    .log-line .msg { min-width: 0; word-break: break-word; }
 
     /* 视频产物 */
     #videoList { max-height: 420px; overflow-y: auto; padding-right: 4px; }
     #videoList::-webkit-scrollbar { width: 8px; }
     #videoList::-webkit-scrollbar-track { background: #EEF2F7; }
     #videoList::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
-    .vgroup { margin-bottom: 12px; }
-    .vdate { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.06em; }
+    .vgroup { margin-bottom: 14px; }
+    .vdate { font-size: 10px; color: var(--dim); margin-bottom: 6px; letter-spacing: 0.1em; }
     .vitem {
-        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-        padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px;
-        margin-bottom: 6px; background: var(--panel2);
+        display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+        padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px;
+        margin-bottom: 6px; background: linear-gradient(180deg, #FFFFFF 0%, #FAFCFE 100%);
+        transition: border-color 0.15s, box-shadow 0.15s;
     }
+    .vitem:hover { border-color: rgba(15, 155, 168, 0.35); box-shadow: 0 4px 14px rgba(27, 39, 53, 0.05); }
     .vmain { flex: 1; min-width: 220px; }
-    .vname { display: block; font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; }
-    .vmeta { font-size: 10px; color: var(--dim); }
+    .vname { display: block; font-size: 12.5px; font-weight: 600; color: var(--text); }
+    .vmeta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--dim); margin-top: 2px; }
+    .vtag {
+        font-size: 9px; color: var(--accent); background: var(--accent-dim);
+        border-radius: 999px; padding: 1px 7px;
+    }
     .vbtns { display: flex; gap: 6px; }
     .vbtn {
         border: 1px solid var(--line); background: var(--panel); color: var(--muted);
-        border-radius: 6px; padding: 4px 11px; font-size: 11px; cursor: pointer; text-decoration: none;
-        display: inline-block;
+        border-radius: 8px; padding: 5px 12px; font-size: 11px; cursor: pointer; text-decoration: none;
+        display: inline-block; transition: border-color 0.15s, color 0.15s;
     }
     .vbtn:hover { border-color: var(--accent); color: var(--accent); }
     .vplayer { width: 100%; margin-top: 6px; }
@@ -549,11 +589,11 @@
         tl.innerHTML = "";
         const dates = rangesData.dates || [];
         if (dates.length === 0) {
-            dateLabel.textContent = rangesMessage || "暂无可用日期";
+            dateLabel.textContent = rangesMessage || "暂无可选日期";
             prev.disabled = true;
             next.disabled = true;
             clear.hidden = true;
-            tl.innerHTML = '<div style="grid-column:1/-1;color:var(--dim);font-size:11px;text-align:center;align-self:center;">该跨度下暂无可用起点</div>';
+            tl.innerHTML = '<div style="grid-column:1/-1;color:var(--dim);font-size:11px;text-align:center;align-self:center;">当前时间段没有连续覆盖的起点</div>';
             updateRangeHint();
             return;
         }
@@ -604,13 +644,13 @@
         const hint = document.getElementById("rangeHint");
         const gran = rangesData.granularity_minutes || 30;
         if (!selected) {
-            hint.textContent = "默认：以最新一帧为终点";
+            hint.textContent = "默认以最新一帧为终点";
             return;
         }
         const date = (rangesData.dates || []).find(d => d.date_str === selected.date_str);
         const item = date ? (date.available_starts || []).find(s => s.index === selected.index) : null;
         if (!item) {
-            hint.textContent = "默认：以最新一帧为终点";
+            hint.textContent = "默认以最新一帧为终点";
             return;
         }
         const start = fmtSlot(selected.index, gran);
@@ -703,15 +743,19 @@
             const color = PALETTE[i % PALETTE.length];
             const hoursWithData = (r.hourly || []).filter(n => n > 0).length;
             const cov = r.avail_24h > 0 ? Math.round(hoursWithData / 24 * 100) : 0;
-            card.style.borderColor = color;
-            card.style.borderWidth = "2px";
+            card.style.setProperty("--c", color);
             card.innerHTML = `
+                <span class="c-accent"></span>
                 <div class="c-body">
-                    <div class="c-name">${r.display_name}</div>
-                    <div class="c-num" style="color:${color};">${r.avail_24h}</div>
-                    <div class="c-meta">最新 ${r.latest_time} · 最早 ${r.earliest_time}</div>
-                    <div class="c-meta">覆盖 ${cov}%</div>
-                    <span class="c-key">${r.key}</span>
+                    <div class="c-head">
+                        <span class="c-dot"></span>
+                        <span class="c-name">${r.display_name}</span>
+                        <span class="c-key">${r.key}</span>
+                    </div>
+                    <div class="c-num">${r.avail_24h}<span class="c-unit">帧</span></div>
+                    <div class="c-line"><span>最新 ${r.latest_time}</span><span>最早 ${r.earliest_time}</span></div>
+                    <div class="c-bar"><i style="width:${cov}%"></i></div>
+                    <div class="c-line"><span>24h 覆盖 ${cov}%</span><span>${hoursWithData}/24 小时</span></div>
                 </div>`;
             grid.appendChild(card);
         });
@@ -878,6 +922,43 @@
     }
 
     let lastLogContent = "";
+    const LOG_LINE_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2},\d{3}) \[([A-Z]+)\] ([\s\S]*)$/;
+
+    function renderLogContent(term, content) {
+        term.innerHTML = "";
+        if (!content) {
+            const span = document.createElement("span");
+            span.className = "empty";
+            span.textContent = "等待后台守护进程输出日志...";
+            term.appendChild(span);
+            return;
+        }
+        content.split("\n").forEach(line => {
+            const match = line.match(LOG_LINE_RE);
+            const row = document.createElement("div");
+            row.className = "log-line";
+            if (match) {
+                row.classList.add(`lvl-${match[3]}`);
+                const time = document.createElement("span");
+                time.className = "t";
+                time.textContent = `${match[1].slice(5)} ${match[2].slice(0, 8)}`;
+                const level = document.createElement("span");
+                level.className = "lvl";
+                level.textContent = match[3];
+                const message = document.createElement("span");
+                message.className = "msg";
+                message.textContent = match[4];
+                row.append(time, level, message);
+            } else {
+                const message = document.createElement("span");
+                message.className = "msg";
+                message.textContent = line;
+                row.appendChild(message);
+            }
+            term.appendChild(row);
+        });
+    }
+
     async function pollLogs() {
         try {
             const res = await fetch("/api/logs");
@@ -886,15 +967,7 @@
             const content = data.logs.join("\n");
             if (content !== lastLogContent) {
                 const stick = term.scrollHeight - term.clientHeight <= term.scrollTop + 15;
-                term.innerHTML = "";
-                if (content) {
-                    term.textContent = content;
-                } else {
-                    const span = document.createElement("span");
-                    span.className = "empty";
-                    span.textContent = "等待后台守护进程输出日志...";
-                    term.appendChild(span);
-                }
+                renderLogContent(term, content);
                 if (stick || lastLogContent === "") term.scrollTop = term.scrollHeight;
                 lastLogContent = content;
             }
@@ -931,15 +1004,22 @@
                 sec.className = "vgroup";
                 const h = document.createElement("div");
                 h.className = "vdate";
-                h.textContent = g.date;
+                const dateText = g.date && g.date.length === 8
+                    ? `${g.date.slice(0, 4)}-${g.date.slice(4, 6)}-${g.date.slice(6, 8)}`
+                    : g.date;
+                h.textContent = `${dateText} · ${g.videos.length} 个产物`;
                 sec.appendChild(h);
                 g.videos.forEach(v => {
                     const row = document.createElement("div");
                     row.className = "vitem";
                     row.innerHTML = `
                         <div class="vmain">
-                            <span class="vname">${v.name}</span>
-                            <span class="vmeta">${fmtSize(v.size)} · ${v.mtime}${v.cron ? " · 定时" : ""}</span>
+                            <span class="vname" title="${v.name}">${v.label || v.name}</span>
+                            <span class="vmeta">
+                                <span>${fmtSize(v.size)}</span>
+                                <span>${v.mtime}</span>
+                                ${v.cron ? '<span class="vtag">定时</span>' : ""}
+                            </span>
                         </div>
                         <div class="vbtns">
                             <button class="vbtn play" type="button">播放</button>

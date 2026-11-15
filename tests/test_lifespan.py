@@ -79,3 +79,12 @@ def test_serve_video_missing_file(tmp_path):
     status, target = web.resolve_video_path("missing.mp4", tmp_path)
     assert status == 404
     assert target is None
+
+
+def test_video_label_is_human_readable():
+    assert web.video_label("TempC_20261023_0000_to_2359.mp4") == "气温填色图 · 2026-10-23 00:00 → 2026-10-23 23:59"
+    assert (
+        web.video_label("RadarGZ_20261023_2300_to_20261024_0100.mp4")
+        == "广州组合反射率 · 2026-10-23 23:00 → 2026-10-24 01:00"
+    )
+    assert web.video_label("weird.mp4") == "weird.mp4"
