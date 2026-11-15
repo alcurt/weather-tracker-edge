@@ -33,11 +33,8 @@
         --fail: #E05252;
         --missing: #D97706;
         --card-a: #FFFFFF;
-        --card-b: #FBFDFF;
         --term-a: #FBFDFF;
-        --term-b: #F6F9FD;
         --vitem-a: #FFFFFF;
-        --vitem-b: #FAFCFE;
         --track: #E5EAF2;
         --scroll: #CBD5E1;
         --log-text: #3E4C60;
@@ -64,11 +61,8 @@
         --fail: #FF7272;
         --missing: #F3A94B;
         --card-a: #18212B;
-        --card-b: #141B23;
         --term-a: #121922;
-        --term-b: #0F151C;
         --vitem-a: #18212B;
-        --vitem-b: #151C24;
         --track: #2A3542;
         --scroll: #3B4859;
         --log-text: #C9D5E4;
@@ -329,7 +323,7 @@
     .card {
         --c: var(--accent);
         position: relative;
-        background: linear-gradient(180deg, var(--card-a) 0%, var(--card-b) 100%);
+        background: var(--card-a);
         border: 1.5px solid var(--c);
         border-radius: 12px;
         overflow: hidden;
@@ -379,7 +373,7 @@
 
     /* 日志终端 */
     .terminal {
-        background: linear-gradient(180deg, var(--term-a) 0%, var(--term-b) 100%);
+        background: var(--term-a);
         border: 0;
         border-radius: 0;
         padding: 4px 14px 12px;
@@ -418,12 +412,12 @@
     .vitem {
         display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
         padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px;
-        margin-bottom: 6px; background: linear-gradient(180deg, var(--vitem-a) 0%, var(--vitem-b) 100%);
+        margin-bottom: 6px; background: var(--vitem-a);
         transition: border-color 0.15s, box-shadow 0.15s;
     }
     .vitem:hover { border-color: rgba(15, 155, 168, 0.35); box-shadow: 0 4px 14px var(--shadow); }
     .vmain { flex: 1; min-width: 220px; }
-    .vhead { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 24px; align-items: baseline; }
+    .vhead { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 0; align-items: baseline; }
     .vname { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .vrange { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .vmeta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 10px; color: var(--dim); margin-top: 3px; }
