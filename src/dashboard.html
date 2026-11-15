@@ -198,6 +198,23 @@
     }
     .range-line b { color: var(--accent); font-weight: 600; }
 
+    /* 任务队列 */
+    .job-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .job-empty { color: var(--dim); font-size: 11px; }
+    .job-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); flex-wrap: wrap; }
+    .job-item .jname { flex: 0 1 240px; min-width: 120px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .job-item .jstate {
+        font-family: var(--mono); font-size: 10px; padding: 1px 5px;
+        border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
+    }
+    .job-item.running .jstate { color: var(--missing); border-color: rgba(217, 119, 6, 0.4); }
+    .job-item.done .jstate { color: var(--ok); border-color: rgba(14, 159, 110, 0.4); }
+    .job-item.failed .jstate { color: var(--fail); border-color: rgba(224, 82, 82, 0.4); }
+    .job-item .jbar { flex: 1 1 90px; height: 4px; background: var(--panel2); border-radius: 2px; overflow: hidden; }
+    .job-item .jbar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+    .job-item .jmeta { font-family: var(--mono); font-size: 10px; color: var(--dim); min-width: 64px; text-align: right; }
+    .job-item .jlink { font-size: 10px; color: var(--accent); text-decoration: none; }
+
     /* 中部双栏 */
     .mid { display: grid; grid-template-columns: 420px 1fr; gap: 10px; align-items: stretch; }
     @media (max-width: 1000px) { .mid { grid-template-columns: 1fr; } }
@@ -384,6 +401,7 @@
             </div>
             <div class="tl-scale"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
             <div class="range-line" id="rangeHint">默认：以最新一帧为终点</div>
+            <div class="job-list" id="jobList"><div class="job-empty">暂无合成任务</div></div>
         </div>
     </section>
 
@@ -456,6 +474,8 @@
     let rangesMessage = "";
     let lastStatusKey = "";
     let lastUptime = -1;
+    let sseActive = false;
+    let eventSource = null;
 
     function fmtUptime(sec) {
         const d = Math.floor(sec / 86400);
@@ -716,68 +736,138 @@
         const d = data.downloads || {};
         const totals = d.totals || {};
         const hours = (d.hours || []).map(h => `${h.key}:${h.ok}:${h.fail}:${h.missing}`).join("|");
+        const jobs = (data.jobs || []).map(j => `${j.id}:${j.state}:${j.progress}:${j.frames_done}`).join("|");
         return [
             data.stats.last_updated,
             data.synth.message,
             data.synth.type,
             data.synth.is_running,
             totals.ok, totals.fail, totals.missing,
-            hours
+            hours,
+            jobs
         ].join("#");
     }
 
     async function pollStatus() {
+        if (sseActive) return;
         try {
             const res = await fetch("/api/status");
-            const data = await res.json();
-            if (data.stats.uptime !== undefined) {
-                uptimeSeconds = data.stats.uptime;
-                document.getElementById("uptimeText").textContent = fmtUptime(uptimeSeconds);
-                // 服务重启后 uptime 归零，强制重建一次，避免沿用旧 DOM
-                if (uptimeSeconds < lastUptime) lastStatusKey = "";
-                lastUptime = uptimeSeconds;
-            }
-            const key = statusKey(data);
-            if (key === lastStatusKey) return;
-            lastStatusKey = key;
-            renderDownloads(data.downloads);
-            renderCards(data.stats.records);
-            document.getElementById("kpiSources").textContent = data.stats.records.length;
-            const tbody = document.getElementById("statsBody");
-            tbody.innerHTML = "";
-            data.stats.records.forEach(r => {
-                const tr = document.createElement("tr");
-                const tdName = document.createElement("td");
-                tdName.innerHTML = '<span class="src-name"></span>';
-                tdName.querySelector(".src-name").textContent = r.display_name;
-                const tdCov = document.createElement("td");
-                const cov = renderCoverage(r.hourly);
-                const label = document.createElement("span");
-                label.className = "coverage-label";
-                label.textContent = `${r.avail_24h} 帧`;
-                cov.appendChild(label);
-                tdCov.appendChild(cov);
-                const tdCount = document.createElement("td");
-                tdCount.className = "num";
-                tdCount.style.textAlign = "right";
-                tdCount.textContent = r.avail_24h;
-                const tdAdd = document.createElement("td");
-                tdAdd.className = "add";
-                tdAdd.style.textAlign = "right";
-                tdAdd.textContent = `+${r.session_dl}`;
-                const tdEarly = document.createElement("td");
-                tdEarly.className = "latest";
-                tdEarly.style.textAlign = "right";
-                tdEarly.textContent = r.earliest_time || "--:--";
-                const tdLatest = document.createElement("td");
-                tdLatest.className = "latest";
-                tdLatest.style.textAlign = "right";
-                tdLatest.textContent = r.latest_time || "--:--";
-                tr.append(tdName, tdCov, tdCount, tdAdd, tdEarly, tdLatest);
-                tbody.appendChild(tr);
-            });
-            renderStatus(data.synth);
+            applyStatus(await res.json());
         } catch (e) { /* 服务重启间隙静默 */ }
+    }
+
+    function applyStatus(data) {
+        if (data.stats.uptime !== undefined) {
+            uptimeSeconds = data.stats.uptime;
+            document.getElementById("uptimeText").textContent = fmtUptime(uptimeSeconds);
+            // 服务重启后 uptime 归零，强制重建一次，避免沿用旧 DOM
+            if (uptimeSeconds < lastUptime) lastStatusKey = "";
+            lastUptime = uptimeSeconds;
+        }
+        const key = statusKey(data);
+        if (key === lastStatusKey) return;
+        lastStatusKey = key;
+        renderDownloads(data.downloads);
+        renderCards(data.stats.records);
+        document.getElementById("kpiSources").textContent = data.stats.records.length;
+        const tbody = document.getElementById("statsBody");
+        tbody.innerHTML = "";
+        data.stats.records.forEach(r => {
+            const tr = document.createElement("tr");
+            const tdName = document.createElement("td");
+            tdName.innerHTML = '<span class="src-name"></span>';
+            tdName.querySelector(".src-name").textContent = r.display_name;
+            const tdCov = document.createElement("td");
+            const cov = renderCoverage(r.hourly);
+            const label = document.createElement("span");
+            label.className = "coverage-label";
+            label.textContent = `${r.avail_24h} 帧`;
+            cov.appendChild(label);
+            tdCov.appendChild(cov);
+            const tdCount = document.createElement("td");
+            tdCount.className = "num";
+            tdCount.style.textAlign = "right";
+            tdCount.textContent = r.avail_24h;
+            const tdAdd = document.createElement("td");
+            tdAdd.className = "add";
+            tdAdd.style.textAlign = "right";
+            tdAdd.textContent = `+${r.session_dl}`;
+            const tdEarly = document.createElement("td");
+            tdEarly.className = "latest";
+            tdEarly.style.textAlign = "right";
+            tdEarly.textContent = r.earliest_time || "--:--";
+            const tdLatest = document.createElement("td");
+            tdLatest.className = "latest";
+            tdLatest.style.textAlign = "right";
+            tdLatest.textContent = r.latest_time || "--:--";
+            tr.append(tdName, tdCov, tdCount, tdAdd, tdEarly, tdLatest);
+            tbody.appendChild(tr);
+        });
+        renderStatus(data.synth);
+        renderJobs(data.jobs);
+    }
+
+    function connectEvents() {
+        if (!window.EventSource) return;
+        if (eventSource) eventSource.close();
+        eventSource = new EventSource("/api/events");
+        eventSource.onopen = () => { sseActive = true; };
+        eventSource.onmessage = (event) => {
+            try { applyStatus(JSON.parse(event.data)); } catch (e) { /* 忽略坏帧 */ }
+        };
+        eventSource.onerror = () => {
+            sseActive = false;
+            if (eventSource) eventSource.close();
+            eventSource = null;
+            setTimeout(connectEvents, 5000);
+        };
+    }
+
+    const JOB_LABEL = { queued: "排队", running: "压制中", done: "完成", failed: "失败" };
+
+    function renderJobs(jobs) {
+        const box = document.getElementById("jobList");
+        box.innerHTML = "";
+        if (!Array.isArray(jobs) || jobs.length === 0) {
+            box.innerHTML = '<div class="job-empty">暂无合成任务</div>';
+            return;
+        }
+        jobs.forEach(job => {
+            const row = document.createElement("div");
+            row.className = `job-item ${job.state}`;
+
+            const name = document.createElement("span");
+            name.className = "jname";
+            name.textContent = `${job.display_name} · ${job.hours}h`;
+            name.title = job.id;
+
+            const state = document.createElement("span");
+            state.className = "jstate";
+            state.textContent = JOB_LABEL[job.state] || job.state;
+
+            const bar = document.createElement("span");
+            bar.className = "jbar";
+            const fill = document.createElement("i");
+            fill.style.width = `${job.state === "done" ? 100 : (job.progress || 0)}%`;
+            bar.appendChild(fill);
+
+            const meta = document.createElement("span");
+            meta.className = "jmeta";
+            meta.textContent = job.state === "running"
+                ? `${job.frames_done}/${job.frames_total}`
+                : (job.finished_at || job.created_at || "");
+
+            row.append(name, state, bar, meta);
+            if (job.url) {
+                const link = document.createElement("a");
+                link.className = "jlink";
+                link.href = job.url;
+                link.textContent = "下载";
+                row.appendChild(link);
+            }
+            if (job.error) row.title = job.error;
+            box.appendChild(row);
+        });
     }
 
     function renderStatus(synth) {
@@ -880,6 +970,7 @@
     document.getElementById("goBtn").addEventListener("click", trigger);
     selectSpan(12);
     loadOptions();
+    connectEvents();
     pollStatus();
     pollLogs();
     loadVideos();

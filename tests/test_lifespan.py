@@ -31,7 +31,25 @@ def test_lifespan_cancels_daemons_and_shuts_poller_down(monkeypatch):
     app = web.build_app(state)
     with TestClient(app) as client:
         assert client.get("/api/options").status_code == 200
-        assert client.get("/api/status").status_code == 200
+        status = client.get("/api/status").json()
+        assert "jobs" in status and "queue_size" in status
+
+        first = client.post(
+            "/api/synthesize",
+            json={"display_name": "气温填色图", "hours": 12},
+        ).json()
+        assert first["code"] == 200
+        assert first["job_id"]
+
+        duplicate = client.post(
+            "/api/synthesize",
+            json={"display_name": "气温填色图", "hours": 12},
+        ).json()
+        assert duplicate["code"] == 409
+
+        jobs = client.get("/api/jobs").json()
+        assert jobs["queue_size"] == 1
+        assert jobs["jobs"][0]["state"] == "queued"
 
     assert flags["created"] is True
     assert flags["shutdown"] is True

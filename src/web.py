@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from analytics import compute_available_ranges, scan_videos, summarize_24h
@@ -25,6 +25,7 @@ from cleaner import StorageCleaner
 from config import DATA_DIR, TZ_UTC8
 from download_stats import download_stats
 from frames import FrameCatalog
+from jobs import JobManager
 from logbus import LOG_BUFFER
 from poller import AsyncPoller
 from synthesizer import Synthesizer
@@ -90,7 +91,7 @@ def cron_due(now: datetime, started_at: datetime, last_triggered_date) -> bool:
 class AppState:
     data_dir: Path = DATA_DIR
     start_time: float = field(default_factory=time.time)
-    synth_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    jobs: JobManager = field(default_factory=JobManager)
     synth_status: dict = field(
         default_factory=lambda: {
             "is_running": False,
@@ -199,14 +200,18 @@ async def cron_loop(state: AppState):
                     if k not in CRON_EXCLUDED_TYPES
                 ]
                 logger.info(f"触发昨日总结，准备向队列压入 {len(tasks)} 个后台合成任务。")
+                submitted = 0
                 for key, name in tasks:
-                    await state.synth_queue.put({
-                        "img_type": key,
-                        "display_name": f"{name} (昨日总结)",
-                        "hours": 24,
-                        "is_cron": True,
-                    })
-                await state.synth_queue.join()
+                    job = state.jobs.submit(
+                        img_type=key,
+                        display_name=f"{name} (昨日总结)",
+                        hours=24,
+                        is_cron=True,
+                    )
+                    if job is not None:
+                        submitted += 1
+                logger.info(f"昨日总结已入队 {submitted} 个任务。")
+                await state.jobs.queue.join()
                 logger.info("昨日总结已全部完成。")
         except asyncio.CancelledError:
             raise
@@ -217,44 +222,60 @@ async def cron_loop(state: AppState):
 
 async def synthesis_worker(state: AppState):
     while True:
-        task = await state.synth_queue.get()
+        job = await state.jobs.queue.get()
         try:
-            img_type = task["img_type"]
-            display_name = task["display_name"]
-            fps = get_dynamic_fps(task["hours"])
-            is_cron = task.get("is_cron", False)
-
+            state.jobs.mark_running(job)
+            display_name = job.display_name
             state.synth_status = {
                 "is_running": True,
                 "message": f"正在后台压制 {display_name} (队列计算中...)",
                 "type": "warning",
             }
+            loop = asyncio.get_running_loop()
+
+            def on_progress(
+                done: int, total: int, target_job=job, event_loop=loop
+            ) -> None:
+                event_loop.call_soon_threadsafe(target_job.set_progress, done, total)
 
             synth = Synthesizer()
             try:
-                success = await asyncio.to_thread(
-                    synth.generate_video, img_type, task["hours"], is_cron, fps, task.get("start_time")
+                output = await asyncio.to_thread(
+                    synth.generate_video,
+                    job.img_type,
+                    job.hours,
+                    job.is_cron,
+                    get_dynamic_fps(job.hours),
+                    job.start_time,
+                    on_progress,
                 )
-                if success:
+                if output is not None:
+                    try:
+                        relative = output.relative_to(state.data_dir / "output").as_posix()
+                    except ValueError:
+                        relative = output.name
+                    state.jobs.mark_done(job, relative)
                     state.synth_status = {
                         "is_running": False,
                         "message": f"[{display_name}] 合成完毕，已落盘。",
                         "type": "success",
                     }
                 else:
+                    state.jobs.mark_failed(job, "数据不完整或 FFmpeg 压制失败")
                     state.synth_status = {
                         "is_running": False,
                         "message": f"[{display_name}] 合成失败，请检查数据完整性。",
                         "type": "error",
                     }
             except Exception as e:
+                state.jobs.mark_failed(job, str(e))
                 state.synth_status = {
                     "is_running": False,
                     "message": f"[{display_name}] 管线崩溃: {str(e)}",
                     "type": "error",
                 }
 
-            if is_cron:
+            if job.is_cron:
                 await asyncio.sleep(5)
         except asyncio.CancelledError:
             raise
@@ -262,7 +283,7 @@ async def synthesis_worker(state: AppState):
             logger.error(f"合成工作机致命异常: {e}")
             await asyncio.sleep(1)
         finally:
-            state.synth_queue.task_done()
+            state.jobs.queue.task_done()
 
 
 def resolve_video_path(path: str, data_dir: Path) -> tuple[int, Path | None]:
@@ -279,6 +300,27 @@ def resolve_video_path(path: str, data_dir: Path) -> tuple[int, Path | None]:
     if not os.path.isfile(target):
         return 404, None
     return 200, Path(target)
+
+
+def status_payload(state: AppState) -> dict:
+    status_copy = dict(state.synth_status)
+    qsize = state.jobs.queue_size()
+    if status_copy["is_running"] and qsize > 0:
+        status_copy["message"] += f" (排队等待中: {qsize} 项)"
+
+    stats_out = dict(state.global_stats)
+    stats_out["uptime"] = int(time.time() - state.start_time)
+    return {
+        "stats": stats_out,
+        "synth": status_copy,
+        "jobs": state.jobs.snapshot(10),
+        "active_job": state.jobs.active(),
+        "queue_size": qsize,
+        "downloads": {
+            "hours": download_stats.snapshot(24),
+            "totals": download_stats.totals(24),
+        },
+    }
 
 
 class SynthRequest(BaseModel):
@@ -320,21 +362,33 @@ def build_app(state: AppState) -> FastAPI:
 
     @app.get("/api/status")
     async def get_status():
-        status_copy = dict(state.synth_status)
-        qsize = state.synth_queue.qsize()
-        if status_copy["is_running"] and qsize > 0:
-            status_copy["message"] += f" (排队等待中: {qsize} 项)"
+        return status_payload(state)
 
-        stats_out = dict(state.global_stats)
-        stats_out["uptime"] = int(time.time() - state.start_time)
-        return {
-            "stats": stats_out,
-            "synth": status_copy,
-            "downloads": {
-                "hours": download_stats.snapshot(24),
-                "totals": download_stats.totals(24),
-            },
-        }
+    @app.get("/api/events")
+    async def events(request: Request):
+        """状态 SSE：仅在快照变化时推送，浏览器断线可回退到 /api/status 轮询。"""
+
+        async def stream():
+            last_key = None
+            while True:
+                if await request.is_disconnected():
+                    break
+                payload = status_payload(state)
+                key = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+                if key != last_key:
+                    last_key = key
+                    yield f"data: {key}\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/jobs")
+    async def get_jobs():
+        return {"code": 200, "jobs": state.jobs.snapshot(30), "queue_size": state.jobs.queue_size()}
 
     @app.get("/api/options")
     async def get_options():
@@ -409,14 +463,16 @@ def build_app(state: AppState) -> FastAPI:
                 return {"code": 400, "message": "start_time 格式应为 YYYYMMDD_HHMM"}
             if start_time > datetime.now(TZ_UTC8):
                 return {"code": 400, "message": "起始时刻不能晚于当前时间"}
-        await state.synth_queue.put({
-            "img_type": img_type,
-            "display_name": req.display_name,
-            "hours": req.hours,
-            "is_cron": False,
-            "start_time": start_time,
-        })
-        return {"code": 200, "message": "任务已加入队列"}
+        job = state.jobs.submit(
+            img_type=img_type,
+            display_name=req.display_name,
+            hours=req.hours,
+            start_time=start_time,
+            is_cron=False,
+        )
+        if job is None:
+            return {"code": 409, "message": "相同任务已在队列或执行中"}
+        return {"code": 200, "message": "任务已加入队列", "job_id": job.id}
 
     @app.get("/", response_class=HTMLResponse)
     async def serve_dashboard():

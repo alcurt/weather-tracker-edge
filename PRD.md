@@ -61,6 +61,7 @@
 * 24 小时（约 240-288 帧）-> `14.4 FPS`
 
 
+* **显式任务模型**：合成请求进入 `JobManager`，状态为 `queued / running / done / failed`，记录帧进度、输出相对路径与错误信息；相同参数的任务在排队或执行中自动去重，WebUI 可查看队列、进度并直接下载产物。
 * **防吞帧定格补偿（Frame Padding）**：鉴于 FFmpeg 处理无音频轨流媒体时的最后一帧丢弃通病，系统在管道写入闭合前，通过内存缓冲区将合法序列的最后一帧二进制流重复向 stdin 管道灌入 `fps * 2` 次，实现视频末尾画面的绝对 2 秒定格，以零磁盘 I/O 开销大幅提升交互观感。
 * **僵尸进程收割（Process Reaper）**：FFmpeg 通过管道 `stdin` 接收数据期间，若 Python IO 线程遭遇系统锁或底层错误异常，系统会捕获异常并立即触发 `process.kill()` 强行猎杀子进程；同时对 `process.communicate()` 设定 300 秒硬性超时，彻底消除僵尸进程导致的内存泄漏危险。
 
@@ -83,6 +84,8 @@
 * **合成时间自由选择**：除“最近 N 小时”外，WebUI 提供 30 分钟粒度的 48 格时间轴可视化（00:00–23:30），点击起点自动高亮整个跨度并显示终点，支持跨日起点（如 23:30 → 次日 02:30）；可用性判定为跨度内每个 30 分钟桶至少 1 帧（24 小时跨度允许最多 4 个缺帧桶，以兼容上游零散缺帧）；帧率仍由跨度小时数固定映射。
 * **跨日产物命名与分组**：凡结束时刻日期与起始日期不同的合成产物，文件名携带结束日期（`{类型}_{起始日期}_{起始时间}_to_{结束日期}_{结束时间}.mp4`），避免仅凭起始日期误判时间归属；分组优先按结束日期（end_date），跨日产物归入结束当天，同日产物回退起始日期，最后兜底文件修改时间。
 * **视频产物面板**：WebUI 按上述日期分组规则列出最近 30 天合成的 MP4（含大小、生成时间与定时标记），支持在线播放与下载；每次请求实时扫描磁盘、不做缓存，保证合成任务完成后刷新即最新。同局域网设备可直接通过管理端口浏览，替代手动 `python -m http.server` 分享流程。
+* **任务队列面板**：合成面板下方展示最近 10 个任务的状态、帧进度、完成时间与产物下载链接，队列中/执行中的同参数任务由后端去重。
+* **SSE 状态推送**：`/api/events` 以 Server-Sent Events 在状态快照变化时推送，前端优先使用 SSE；连接失败时自动回退到 2 秒 `/api/status` 轮询。日志终端仍按 2 秒拉取。
 * **终端映射（Virtual Terminal）**：后端配置内存环形队列（`collections.deque(maxlen=200)`）拦截全局日志，前端每 2 秒异步拉取并呈现于页面最底部日志终端中，具备基于滚动条容差判定的智能贴底自动滚动功能。
 
 #### 2.6 下载结果统计与持久化 (Download Stats)
@@ -158,6 +161,7 @@ GuangzhouWeatherTracker/
 │   ├── logbus.py                  # 控制台/轮转文件/WebUI 内存日志三路总线
 │   ├── poller.py                  # 三轨探测器、调度与状态码/宽限期策略
 │   ├── synthesizer.py             # 反向时间轴推演、动态 FPS、防泄漏管道推流
+│   ├── jobs.py                    # 合成任务模型、去重、进度与最近任务快照
 │   ├── analytics.py               # 24h 聚合、30 分钟时间轴与视频分组（纯逻辑）
 │   ├── frames.py                  # 文件名时间戳编解码与按日目录时间戳缓存
 │   ├── grid.py                    # 雷达/FY4C 通用网格时次、单时次抓取与原子落盘
@@ -250,7 +254,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 开发机（台式机）修改完成后，仅需向笔记本复制以下代码层与文档文件（覆盖同名文件，不触碰 data/ 与 logs/）：
 
 * `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/web.py`、`src/logbus.py`、`src/dashboard.html`
-* `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/fetch.py`、`src/storage.py`
+* `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/jobs.py`、`src/fetch.py`、`src/storage.py`
 * `README.md`、`PRD.md`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
 

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -62,15 +63,16 @@ class Synthesizer:
         is_cron: bool = False,
         fps: float = 10.0,
         start_time: datetime | None = None,
-    ) -> bool:
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> Path | None:
         if not self.ffmpeg_path.exists():
             logger.error(f"未找到 FFmpeg 二进制文件: {self.ffmpeg_path}。请手动下载并放入项目根目录。")
-            return False
+            return None
 
         type_dir = DATA_DIR / img_type
         if not type_dir.exists():
             logger.warning(f"[{img_type}] 暂无该类型的数据目录。")
-            return False
+            return None
 
         now = datetime.now(TZ_UTC8)
 
@@ -100,7 +102,7 @@ class Synthesizer:
 
         if not end_time:
             logger.warning(f"[{img_type}] 近期目录为空，没有任何可供推演的物理锚点。")
-            return False
+            return None
 
         if not is_cron and start_time is None:
             if hours == 0:
@@ -111,7 +113,7 @@ class Synthesizer:
         valid_images = self._collect_frames(type_dir, start_time, end_time)
         if not valid_images:
             logger.warning(f"[{img_type}] 在截取的时间窗推演内没有任何数据。")
-            return False
+            return None
         sorted_paths = [item[0] for item in valid_images]
 
         output_path = build_output_path(self.output_dir, img_type, start_time, end_time, is_cron)
@@ -146,6 +148,10 @@ class Synthesizer:
             f"{end_time.strftime('%H:%M')}，共 {len(sorted_paths)} 帧..."
         )
 
+        total_frames = len(sorted_paths)
+        if progress_cb is not None:
+            progress_cb(0, total_frames)
+
         process = None
         try:
             process = subprocess.Popen(
@@ -157,9 +163,11 @@ class Synthesizer:
             )
 
             try:
-                for img_path in sorted_paths:
+                for index, img_path in enumerate(sorted_paths, start=1):
                     with open(img_path, "rb") as f:
                         process.stdin.write(f.read())
+                    if progress_cb is not None:
+                        progress_cb(index, total_frames)
 
                 # 末尾定格 2 秒：ffmpeg 对无音轨流有丢最后一帧的倾向
                 hold_frames = int(fps * 2)
@@ -183,7 +191,7 @@ class Synthesizer:
                 logger.error(f"[{img_type}] FFmpeg 压制失败，Exit Code: {process.returncode}")
                 logger.error(f"FFmpeg 报错详情: {stderr_data.decode('utf-8', errors='ignore')}")
                 part_path.unlink(missing_ok=True)
-                return False
+                return None
 
             try:
                 os.replace(part_path, output_path)
@@ -195,7 +203,7 @@ class Synthesizer:
                 output_path = fallback
 
             logger.info(f"[{img_type}] 视频合成成功！输出路径: {output_path}")
-            return True
+            return output_path
 
         except Exception as e:
             logger.exception(f"[{img_type}] 合成管道发生严重崩溃: {e}")
@@ -203,4 +211,4 @@ class Synthesizer:
                 process.kill()
                 process.communicate()
             part_path.unlink(missing_ok=True)
-            return False
+            return None

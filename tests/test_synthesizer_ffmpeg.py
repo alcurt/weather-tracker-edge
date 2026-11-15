@@ -28,7 +28,9 @@ def test_generate_video_writes_complete_mp4_atomically(tmp_path, monkeypatch):
 
     monkeypatch.setattr(synth_module, "DATA_DIR", tmp_path)
     synth = synth_module.Synthesizer()
-    assert synth.generate_video("TempC", 1, start_time=start) is True
+    output = synth.generate_video("TempC", 1, start_time=start)
+    assert output is not None
+    assert output.exists()
 
     outputs = list((tmp_path / "output").glob("*.mp4"))
     assert len(outputs) == 1
