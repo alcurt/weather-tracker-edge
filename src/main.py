@@ -18,13 +18,13 @@ from pydantic import BaseModel
 
 from analytics import (
     compute_available_ranges,
-    parse_frame_timestamp,
     scan_videos,
     summarize_24h,
 )
 from cleaner import StorageCleaner
 from config import DATA_DIR, TZ_UTC8
 from download_stats import download_stats
+from frames import FrameCatalog
 from poller import AsyncPoller
 from synthesizer import Synthesizer
 
@@ -149,21 +149,13 @@ def cron_due(now: datetime, started_at: datetime, last_triggered_date) -> bool:
 # ==========================================
 # 后台异步守护协程 (元数据门铃监听)
 # ==========================================
-def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, dir_cache: dict) -> list:
+def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, catalog) -> list:
     """采集一次 UI 聚合数据（纯同步，便于单测）。
 
-    dir_cache 只缓存"目录 mtime -> 原始时间戳列表"，聚合值每次按 now 现算，
+    目录扫描与时间戳解析交给 FrameCatalog，聚合值每次按 now 现算，
     因此时间推移不会让覆盖带/24h 帧数停留在旧位置。
     """
     records = []
-    active_dates = {
-        (k, (now - timedelta(days=days_back)).strftime("%Y%m%d"))
-        for k in all_target_keys
-        for days_back in (0, 1)
-    }
-    for stale_key in [key for key in dir_cache if key not in active_dates]:
-        dir_cache.pop(stale_key, None)
-
     for k in all_target_keys:
         # 1. 游标对比计算本次会话新增（近似值：每 5 秒采样一次）
         cursor_file = DATA_DIR / k / ".latest_cursor.json"
@@ -177,36 +169,11 @@ def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, dir_c
             except Exception:
                 pass
 
-        # 2. 元数据门铃：只读取今天和昨天两个目录，mtime 不变则不重扫
+        # 2. 只读取今天和昨天两个目录，FrameCatalog 以目录 mtime 缓存原始时间戳
         timestamps = []
-        type_dir = DATA_DIR / k
-        if type_dir.exists():
-            for days_back in (0, 1):
-                date_str = (now - timedelta(days=days_back)).strftime("%Y%m%d")
-                date_dir = type_dir / date_str
-                if not date_dir.is_dir():
-                    continue
-                try:
-                    current_mtime = date_dir.stat().st_mtime
-                except OSError:
-                    continue
-                cache_key = (k, date_str)
-                cached = dir_cache.get(cache_key)
-                if cached is None or cached["mtime"] != current_mtime:
-                    day_timestamps = []
-                    try:
-                        with os.scandir(date_dir) as entries:
-                            for entry in entries:
-                                if not entry.name.endswith(".png"):
-                                    continue
-                                ts = parse_frame_timestamp(entry.name)
-                                if ts is not None:
-                                    day_timestamps.append(ts)
-                    except OSError:
-                        continue
-                    cached = {"mtime": current_mtime, "timestamps": day_timestamps}
-                    dir_cache[cache_key] = cached
-                timestamps.extend(cached["timestamps"])
+        for days_back in (0, 1):
+            date_str = (now - timedelta(days=days_back)).strftime("%Y%m%d")
+            timestamps.extend(catalog.timestamps(k, date_str))
 
         summary = summarize_24h(timestamps, now)
         latest_ts = max(timestamps) if timestamps else None
@@ -226,9 +193,7 @@ def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, dir_c
 async def stats_loop():
     session_counts = {k: 0 for k in all_target_keys}
     last_cursors = {k: "" for k in all_target_keys}
-
-    # 内存缓存：{(img_type, YYYYMMDD): {"mtime": float, "timestamps": [datetime]}}
-    dir_cache = {}
+    catalog = FrameCatalog(DATA_DIR)
 
     for k in all_target_keys:
         cursor_file = DATA_DIR / k / ".latest_cursor.json"
@@ -242,7 +207,7 @@ async def stats_loop():
     while True:
         try:
             now = datetime.now(TZ_UTC8)
-            records = await asyncio.to_thread(collect_stats, now, session_counts, last_cursors, dir_cache)
+            records = await asyncio.to_thread(collect_stats, now, session_counts, last_cursors, catalog)
             GLOBAL_STATS["records"] = records
             GLOBAL_STATS["last_updated"] = now.strftime("%H:%M:%S")
         except Exception as e:

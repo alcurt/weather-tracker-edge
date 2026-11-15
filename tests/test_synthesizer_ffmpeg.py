@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import synthesizer as synth_module
-from analytics import parse_frame_timestamp
+from frames import parse_frame_timestamp
 
 ROOT = Path(__file__).resolve().parents[1]
 FFMPEG = ROOT / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")

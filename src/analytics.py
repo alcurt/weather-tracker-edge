@@ -5,29 +5,18 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import TZ_UTC8
+from frames import FrameCatalog
 
-FRAME_TS_FORMAT = "%Y%m%d_%H%M%S"
 RANGE_GRANULARITY_MINUTES = 30
 SLOTS_PER_DAY = 24 * 60 // RANGE_GRANULARITY_MINUTES  # 48
 
 # 24 小时跨度允许的缺帧桶数，兼容上游零散缺帧
 MAX_MISSING_SLOTS_24H = 4
-
-
-def parse_frame_timestamp(name: str, tz=TZ_UTC8) -> datetime | None:
-    """从 ``YYYYMMDD_HHMMSS_<source>.png`` 解析时间戳；格式不符返回 None。"""
-    if len(name) < 15 or name[8] != "_":
-        return None
-    try:
-        return datetime.strptime(name[:15], FRAME_TS_FORMAT).replace(tzinfo=tz)
-    except ValueError:
-        return None
 
 
 def summarize_24h(timestamps: Iterable[datetime], now: datetime, hours: int = 24) -> dict:
@@ -58,6 +47,7 @@ def compute_available_ranges(
     type_dir: Path,
     now: datetime | None = None,
     lookback_days: int = 7,
+    catalog: FrameCatalog | None = None,
 ) -> dict:
     """扫描本地帧，返回 30 分钟粒度时间轴数据。
 
@@ -69,27 +59,14 @@ def compute_available_ranges(
         return result
 
     current = now or datetime.now(TZ_UTC8)
+    catalog = catalog or FrameCatalog(type_dir.parent)
     bucket_sets: dict[str, set[int]] = {}
     for days_back in range(lookback_days):
         date_str = (current - timedelta(days=days_back)).strftime("%Y%m%d")
-        date_dir = type_dir / date_str
-        if not date_dir.is_dir():
-            continue
-        indices: set[int] = set()
-        try:
-            with os.scandir(date_dir) as entries:
-                for entry in entries:
-                    name = entry.name
-                    # 文件名形如 YYYYMMDD_HHMMSS_type.png：直接切片取小时分钟，跳过 strptime
-                    if name.endswith(".png") and len(name) >= 14 and name[8] == "_":
-                        try:
-                            hh = int(name[9:11])
-                            mm = int(name[11:13])
-                        except ValueError:
-                            continue
-                        indices.add((hh * 60 + mm) // RANGE_GRANULARITY_MINUTES)
-        except OSError:
-            continue
+        indices = {
+            (ts.hour * 60 + ts.minute) // RANGE_GRANULARITY_MINUTES
+            for ts in catalog.timestamps(img_type, date_str)
+        }
         if indices:
             bucket_sets[date_str] = indices
 

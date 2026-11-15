@@ -154,9 +154,11 @@ GuangzhouWeatherTracker/
 │   └── tracker.log                # 轮转与持久化双写系统日志
 ├── src/
 │   ├── main.py                    # ASGI 服务、内存日志总线、五大协程调度与 HTML 视图
-│   ├── poller.py                  # 三轨探测器、Pillow IEND 校验与原子游标写入
+│   ├── poller.py                  # 三轨探测器、调度与状态码/宽限期策略
 │   ├── synthesizer.py             # 反向时间轴推演、动态 FPS、防泄漏管道推流
-│   ├── analytics.py               # 时间戳解析、24h 聚合、30 分钟时间轴与视频分组（纯逻辑）
+│   ├── analytics.py               # 24h 聚合、30 分钟时间轴与视频分组（纯逻辑）
+│   ├── frames.py                  # 文件名时间戳编解码与按日目录时间戳缓存
+│   ├── grid.py                    # 雷达/FY4C 通用网格时次、单时次抓取与原子落盘
 │   ├── fetch.py                   # 状态码分类、Retry-After 与指数退避策略
 │   ├── storage.py                 # 原子写（图片/JSON）与 .part 残片清理
 │   ├── download_stats.py          # 下载结果统计（ok/fail/missing）与 JSON 持久化
@@ -246,7 +248,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 开发机（台式机）修改完成后，仅需向笔记本复制以下代码层与文档文件（覆盖同名文件，不触碰 data/ 与 logs/）：
 
 * `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/dashboard.html`
-* `src/analytics.py`、`src/fetch.py`、`src/storage.py`
+* `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/fetch.py`、`src/storage.py`
 * `README.md`、`PRD.md`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
 

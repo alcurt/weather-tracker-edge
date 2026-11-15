@@ -12,7 +12,6 @@ import aiofiles
 import httpx
 from PIL import Image
 
-from analytics import parse_frame_timestamp
 from config import (
     BASE_TIMEOUT,
     CONNECTION_RECYCLE_SECONDS,
@@ -45,6 +44,8 @@ from config import (
 )
 from download_stats import download_stats
 from fetch import SlotProbeCache, is_retryable_status, retry_delay
+from frames import parse_frame_timestamp
+from grid import fetch_grid_slot, grid_slot_key, grid_slots, slot_is_mature
 from storage import atomic_write_bytes_async
 
 logger = logging.getLogger(__name__)
@@ -57,11 +58,6 @@ def build_radar_url(radar_type: str, target_time: datetime) -> str:
         upstream_time_str=target_time.strftime("%Y%m%d%H%M00"),
         suffix=RADAR_TYPES[radar_type],
     )
-
-
-def slot_is_mature(now: datetime, target_time: datetime, min_age_minutes: int) -> bool:
-    """时次是否已过最小成熟期；未成熟时上游通常尚未发布，探测必然是 404。"""
-    return now - target_time >= timedelta(minutes=min_age_minutes)
 
 
 def build_nmc_url(img_type: str, target_time: datetime) -> str:
@@ -217,10 +213,6 @@ class AsyncPoller:
                 if count_fail:
                     download_stats.record("fail")
 
-    @staticmethod
-    def _probe_key(source: str, target_time: datetime) -> str:
-        return f"{source}:{target_time.strftime('%Y%m%d_%H%M%S')}"
-
     def _mark_probe_results(self, pairs: list, results: list) -> None:
         for (_, key), result in zip(pairs, results, strict=False):
             if result in ("200", "EXIST"):
@@ -235,72 +227,16 @@ class AsyncPoller:
     async def _fetch_single_radar(
         self, radar_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
     ) -> str:
-        """抓取单个时刻雷达图：内置坏图免疫与断点续传校验"""
-        date_str = target_time.strftime("%Y%m%d")
-        upstream_time_str = target_time.strftime("%Y%m%d%H%M00")
-        internal_time_str = target_time.strftime("%Y%m%d_%H%M%S")
-        file_name = f"{internal_time_str}_{radar_type}.png"
-        
-        save_dir = DATA_DIR / radar_type / date_str
-        file_path = save_dir / file_name
-        
-        # 坚守文件系统绝对真相，同时建立物理残片剥离防线，防止迁移污染
-        if file_path.exists():
-            try:
-                if file_path.stat().st_size < 100:
-                    logger.warning(f"[{radar_type}] 发现本地坏图或零字节残片 {file_name}，正在物理移除并触发重抓。")
-                    file_path.unlink()
-                else:
-                    return "EXIST" # 本地缓存健康，跳过
-            except Exception:
-                return "ERROR"
-            
-        url = build_radar_url(radar_type, target_time)
-
-        attempt = 0
-        while attempt <= max_retries:
-            try:
-                async with self.client.stream("GET", url) as response:
-                    if response.status_code == 404:
-                        return "404"
-                    if is_retryable_status(response.status_code):
-                        raise httpx.HTTPStatusError(
-                            f"HTTP {response.status_code}", request=response.request, response=response
-                        )
-                    response.raise_for_status()
-                    content = await response.aread()
-
-                    try:
-                        img = Image.open(io.BytesIO(content))
-                        img.verify()
-                    except Exception as e:
-                        logger.warning(f"[{radar_type}] 图像尾块损坏，重试: {e}")
-                        raise ValueError("Radar verification failed") from e
-
-                    await atomic_write_bytes_async(file_path, content)
-
-                    await self.cursors[radar_type].update("", "", "", str(file_path))
-                    logger.info(f"[{radar_type}] 新雷达图成功落盘: {file_name}")
-                    return "200"
-            except httpx.HTTPStatusError as e:
-                if not is_retryable_status(e.response.status_code):
-                    logger.error(f"[{radar_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次 {upstream_time_str}")
-                    return "ERROR"
-                attempt += 1
-                if attempt > max_retries:
-                    logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
-                    return "FETCH_ERR"
-                await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
-            except (httpx.RequestError, ValueError):
-                attempt += 1
-                if attempt > max_retries:
-                    logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
-                    return "FETCH_ERR"
-                await asyncio.sleep(retry_delay(attempt))
-            except Exception as e:
-                logger.exception(f"[{radar_type}] 发生未预期的致命异常: {e}")
-                return "CRASH"
-        return "TIMEOUT"
+        """抓取单个时刻雷达图（通用网格抓取）。"""
+        return await fetch_grid_slot(
+            self.client,
+            source=radar_type,
+            target_time=target_time,
+            url=build_radar_url(radar_type, target_time),
+            data_dir=DATA_DIR,
+            cursor=self.cursors[radar_type],
+            max_retries=max_retries,
+        )
 
     async def _backfill_radar_source(self, radar_type: str, now: datetime) -> None:
         """扫描最近数小时的雷达缺口，自愈超过常规窗口的断网。"""
@@ -311,7 +247,7 @@ class AsyncPoller:
             microsecond=0,
         )
         pairs = [
-            (target_time, self._probe_key(radar_type, target_time))
+            (target_time, grid_slot_key(radar_type, target_time))
             for target_time in (
                 base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
                 for i in range(slot_count)
@@ -366,7 +302,7 @@ class AsyncPoller:
                 )
                 slot_count = int(RADAR_POLL_WINDOW_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
                 pairs = [
-                    (target_time, self._probe_key(radar_type, target_time))
+                    (target_time, grid_slot_key(radar_type, target_time))
                     for target_time in (
                         base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
                         for i in range(slot_count)
@@ -417,85 +353,20 @@ class AsyncPoller:
     async def _fetch_single_nmc(
         self, img_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
     ) -> str:
-        """抓取单个时次中央台卫星云图：本地去重 + 404 容忍 + 坏图重抓"""
-        file_name = f"{target_time.strftime('%Y%m%d_%H%M%S')}_{img_type}.png"
-        save_dir = DATA_DIR / img_type / target_time.strftime("%Y%m%d")
-        file_path = save_dir / file_name
-
-        # 本地缓存健康则零请求跳过；坏图/零字节残片物理移除后重抓
-        if file_path.exists():
-            try:
-                if file_path.stat().st_size < 100:
-                    logger.warning(f"[{img_type}] 发现本地坏图或零字节残片 {file_name}，正在物理移除并触发重抓。")
-                    file_path.unlink()
-                else:
-                    return "EXIST"
-            except Exception:
-                return "ERROR"
-
-        url = build_nmc_url(img_type, target_time)
-        attempt = 0
-        while attempt <= max_retries:
-            try:
-                async with self.client.stream("GET", url) as response:
-                    if response.status_code == 404:
-                        # 上游该时次不存在（缺帧/未来时次），静默跳过避免日志刷屏
-                        return "404"
-                    if is_retryable_status(response.status_code):
-                        raise httpx.HTTPStatusError(
-                            f"HTTP {response.status_code}", request=response.request, response=response
-                        )
-                    response.raise_for_status()
-                    content = await response.aread()
-
-                    try:
-                        img = Image.open(io.BytesIO(content))
-                        img.verify()
-                    except Exception as e:
-                        logger.warning(f"[{img_type}] 图像尾块损坏，重试: {e}")
-                        raise ValueError("NMC satellite image verification failed") from e
-
-                    await atomic_write_bytes_async(file_path, content)
-
-                    await self.cursors[img_type].update("", "", "", str(file_path))
-                    logger.info(f"[{img_type}] 新卫星云图成功落盘: {file_name}")
-                    return "200"
-            except httpx.HTTPStatusError as e:
-                if not is_retryable_status(e.response.status_code):
-                    logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次")
-                    return "ERROR"
-                attempt += 1
-                if attempt > max_retries:
-                    logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
-                    return "FETCH_ERR"
-                await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
-            except (httpx.RequestError, ValueError):
-                attempt += 1
-                if attempt > max_retries:
-                    logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
-                    return "FETCH_ERR"
-                await asyncio.sleep(retry_delay(attempt))
-            except Exception as e:
-                logger.exception(f"[{img_type}] 发生未预期的致命异常: {e}")
-                return "CRASH"
-        return "TIMEOUT"
+        """抓取单个时次中央台卫星云图（通用网格抓取）。"""
+        return await fetch_grid_slot(
+            self.client,
+            source=img_type,
+            target_time=target_time,
+            url=build_nmc_url(img_type, target_time),
+            data_dir=DATA_DIR,
+            cursor=self.cursors[img_type],
+            max_retries=max_retries,
+        )
 
     @staticmethod
     def _grid_slots(now: datetime, step_minutes: int, newest_minutes: int, oldest_minutes: int) -> list:
-        """生成 [newest, oldest] 区间内的理论时次，按从新到旧排序。"""
-        base_time = now.replace(
-            minute=(now.minute // step_minutes) * step_minutes,
-            second=0,
-            microsecond=0,
-        )
-        newest = base_time - timedelta(minutes=newest_minutes)
-        oldest = base_time - timedelta(minutes=oldest_minutes)
-        slots = []
-        current = newest
-        while current >= oldest:
-            slots.append(current)
-            current -= timedelta(minutes=step_minutes)
-        return slots
+        return grid_slots(now, step_minutes, newest_minutes, oldest_minutes)
 
     async def _probe_nmc_depth(self, img_type: str, now: datetime, depth_minutes: int) -> bool:
         """探测指定深度上是否有上游时次；抽样两个相邻时次，避免单帧缺帧误判。"""
@@ -558,7 +429,7 @@ class AsyncPoller:
         for i in range(0, len(slots), NMC_BACKFILL_BATCH_SIZE):
             await self._ensure_client()
             batch = slots[i:i + NMC_BACKFILL_BATCH_SIZE]
-            pairs = [(t, self._probe_key(img_type, t)) for t in batch]
+            pairs = [(t, grid_slot_key(img_type, t)) for t in batch]
             results = await asyncio.gather(*[fetch_one(t) for t in batch])
             self._record_download_results(
                 img_type, results,
@@ -641,7 +512,7 @@ class AsyncPoller:
 
                 slot_count = int(NMC_POLL_WINDOW_HOURS * 60 / step_minutes)
                 pairs = [
-                    (target_time, self._probe_key(img_type, target_time))
+                    (target_time, grid_slot_key(img_type, target_time))
                     for target_time in (
                         base_time - timedelta(minutes=step_minutes * i)
                         for i in range(slot_count)

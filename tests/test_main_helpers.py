@@ -2,6 +2,7 @@ from datetime import date, datetime
 
 import main
 from config import TZ_UTC8
+from frames import FrameCatalog
 
 
 def test_dynamic_fps_mapping():
@@ -49,7 +50,10 @@ def test_collect_stats_ignores_part_files(tmp_path, monkeypatch):
     (date_dir / "20260101_121000_TempC.png.part").write_bytes(b"partial")
 
     records = main.collect_stats(
-        datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8), {"TempC": 0}, {"TempC": ""}, {}
+        datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8),
+        {"TempC": 0},
+        {"TempC": ""},
+        FrameCatalog(tmp_path),
     )
     assert records[0]["avail_24h"] == 1
     assert records[0]["latest_time"] == "12:00"
@@ -66,20 +70,20 @@ def test_collect_stats_recomputes_hourly_as_time_moves(tmp_path, monkeypatch):
 
     session_counts = {"TempC": 0}
     last_cursors = {"TempC": ""}
-    cache = {}
+    catalog = FrameCatalog(tmp_path)
 
-    first = main.collect_stats(datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, cache)
+    first = main.collect_stats(datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, catalog)
     assert first[0]["avail_24h"] == 1
     assert first[0]["hourly"][0] == 1
     assert first[0]["latest_time"] == "12:00"
 
     # 目录不再写入、mtime 不变，但时间推进后聚合结果必须随 now 重算
-    second = main.collect_stats(datetime(2026, 1, 1, 13, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, cache)
+    second = main.collect_stats(datetime(2026, 1, 1, 13, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, catalog)
     assert second[0]["avail_24h"] == 1
     assert second[0]["hourly"][0] == 0
     assert second[0]["hourly"][1] == 1
 
     # 再推进 24 小时，帧滑出窗口，计数应归零
-    third = main.collect_stats(datetime(2026, 1, 2, 13, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, cache)
+    third = main.collect_stats(datetime(2026, 1, 2, 13, 30, tzinfo=TZ_UTC8), session_counts, last_cursors, catalog)
     assert third[0]["avail_24h"] == 0
     assert third[0]["hourly"] == [0] * 24

@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta
 
-from analytics import compute_available_ranges, parse_frame_timestamp, scan_videos, summarize_24h
+from analytics import compute_available_ranges, scan_videos, summarize_24h
 from config import TZ_UTC8
+from frames import parse_frame_timestamp
 
 
 def _touch(path, ts: datetime) -> None:
