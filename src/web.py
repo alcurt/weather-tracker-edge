@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from analytics import compute_available_ranges, scan_videos, summarize_24h
@@ -62,6 +62,10 @@ FPS_BY_HOURS = {1: 4.0, 3: 6.0, 6: 8.0, 12: 9.6, 24: 14.4}
 
 RANGE_GRANULARITY_MINUTES = 30
 RANGES_CACHE_TTL = 60
+
+# 健康检查：启动后给采集器一个宽限期；之后任一信源超过 10 分钟没有完成 tick 即降级
+HEALTH_STARTUP_GRACE_SECONDS = 180
+HEALTH_MAX_SILENCE_SECONDS = 600
 
 HTML_TEMPLATE = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
@@ -302,6 +306,57 @@ def resolve_video_path(path: str, data_dir: Path) -> tuple[int, Path | None]:
     return 200, Path(target)
 
 
+def health_snapshot(state: AppState) -> tuple[int, dict]:
+    """返回 (HTTP 状态码, 健康快照)。
+
+    启动 180 秒内允许 INIT；之后任一信源 10 分钟没有完成 tick 即视为 degraded。
+    """
+    now = time.time()
+    uptime = int(now - state.start_time)
+    metrics = getattr(state.poller, "metrics", {}) if state.poller is not None else {}
+    sources = []
+    stale = []
+    all_started = True
+    for key in all_target_keys:
+        metric = metrics.get(key, {})
+        last_updated = float(metric.get("updated_at") or 0.0)
+        age = int(now - last_updated) if last_updated else None
+        if last_updated:
+            healthy = age <= HEALTH_MAX_SILENCE_SECONDS
+        else:
+            # 尚未完成首轮（例如 FY4C 回补中）：最长给 10 分钟启动时间
+            healthy = uptime < HEALTH_MAX_SILENCE_SECONDS
+            all_started = False
+        if not healthy:
+            stale.append(key)
+        sources.append({
+            "key": key,
+            "display_name": flat_display_map[key],
+            "status": metric.get("status", "INIT"),
+            "last_tick_age_seconds": age,
+            "healthy": healthy,
+        })
+
+    if uptime < HEALTH_STARTUP_GRACE_SECONDS or (not all_started and uptime < HEALTH_MAX_SILENCE_SECONDS):
+        overall = "starting"
+    elif stale:
+        overall = "degraded"
+    else:
+        overall = "ok"
+
+    payload = {
+        "status": overall,
+        "uptime": uptime,
+        "max_silence_seconds": HEALTH_MAX_SILENCE_SECONDS,
+        "sources": sources,
+        "jobs": {
+            "queue_size": state.jobs.queue_size(),
+            "active": state.jobs.active(),
+        },
+    }
+    return (200 if overall in ("ok", "starting") else 503), payload
+
+
 def status_payload(state: AppState) -> dict:
     status_copy = dict(state.synth_status)
     qsize = state.jobs.queue_size()
@@ -363,6 +418,11 @@ def build_app(state: AppState) -> FastAPI:
     @app.get("/api/status")
     async def get_status():
         return status_payload(state)
+
+    @app.get("/api/health")
+    async def get_health():
+        code, payload = health_snapshot(state)
+        return JSONResponse(payload, status_code=code)
 
     @app.get("/api/events")
     async def events(request: Request):

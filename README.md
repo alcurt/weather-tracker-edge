@@ -12,10 +12,25 @@
 
 1. 环境还原：`uv sync`（需自备 `ffmpeg.exe`，本仓库不收录）
 2. 放行端口（管理员 PowerShell）：`New-NetFirewallRule -DisplayName "Weather Tracker Edge Node" -Direction Inbound -Protocol TCP -LocalPort 11451 -Action Allow`
-3. 后台启动：双击 `start_node.vbs`
+3. 后台启动：双击 `start_node.vbs`，或注册开机自启计划任务（见下）
 4. 访问控制台：局域网浏览器打开 `http://<节点IP>:11451`
 
 `data/`、`logs/` 由程序首次运行自动创建，无需手动准备。
+
+## 开机自启与健康检查（阶段四）
+
+推荐用计划任务替代手动双击 `start_node.vbs`。管理员 PowerShell 在项目根目录执行：
+
+```powershell
+.\deploy\install_task.ps1          # 注册 SYSTEM 任务，pythonw 无窗口启动，异常退出自动重启
+.\deploy\uninstall_task.ps1        # 卸载
+Start-ScheduledTask -TaskName WeatherTrackerEdgeNode   # 立即启动
+```
+
+- 计划任务名：`WeatherTrackerEdgeNode`；日志仍在 `logs/tracker.log`。
+- 健康检查：`http://<节点IP>:11451/api/health`。启动 180 秒内、或仍有信源未完成首轮采集（最长 10 分钟）时返回 `starting`；之后任一信源 10 分钟未完成 tick 返回 HTTP 503 / `degraded`。
+- 可选看门狗：`deploy\watchdog.ps1` 探测 `/api/health`，失败时重启计划任务；可用任务计划程序每 5 分钟运行一次（以 SYSTEM 身份）。
+- 仍保留 `start_node.vbs` / `stop_node.bat` 作为手动启停方式。
 
 ## 开发与测试
 
@@ -38,6 +53,7 @@ uv run pytest               # 单元测试；本机有 ffmpeg.exe 时会额外�
 - 首次 FY4C 回补：启动先补最近 24 小时，再按上游实际保留深度自适应延伸到目标 48 小时；运行期每 6 小时重扫一次历史缺口
 - 雷达缺口自愈：启动及每 30 分钟扫描最近 6 小时，时次成熟 6 分钟后才探测，避免发布前反复 404
 - 终止进程：根目录下 `stop_node.bat` 或 `taskkill /f /im pythonw.exe`
+- 健康检查：`GET /api/health`；计划任务/看门狗用法见上方“开机自启与健康检查”
 - 台式机 → 笔记本手动同步清单见 [PRD.md](PRD.md) 5.4
 
 ## 协议与授权

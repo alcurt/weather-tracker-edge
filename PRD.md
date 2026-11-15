@@ -86,6 +86,7 @@
 * **视频产物面板**：WebUI 按上述日期分组规则列出最近 30 天合成的 MP4（含大小、生成时间与定时标记），支持在线播放与下载；每次请求实时扫描磁盘、不做缓存，保证合成任务完成后刷新即最新。同局域网设备可直接通过管理端口浏览，替代手动 `python -m http.server` 分享流程。
 * **任务队列面板**：合成面板下方展示最近 10 个任务的状态、帧进度、完成时间与产物下载链接，队列中/执行中的同参数任务由后端去重。
 * **SSE 状态推送**：`/api/events` 以 Server-Sent Events 在状态快照变化时推送，前端优先使用 SSE；连接失败时自动回退到 2 秒 `/api/status` 轮询。日志终端仍按 2 秒拉取。
+* **健康检查**：`/api/health` 返回整体状态与每个信源最近一次 tick 的年龄。启动 180 秒内、或仍有信源未完成首轮采集（最长 600 秒）时返回 `starting`（200）；之后任一信源超过 10 分钟没有完成 tick 返回 `degraded`（503），供计划任务看门狗判断“进程活着但采集卡死”。
 * **终端映射（Virtual Terminal）**：后端配置内存环形队列（`collections.deque(maxlen=200)`）拦截全局日志，前端每 2 秒异步拉取并呈现于页面最底部日志终端中，具备基于滚动条容差判定的智能贴底自动滚动功能。
 
 #### 2.6 下载结果统计与持久化 (Download Stats)
@@ -155,6 +156,10 @@ GuangzhouWeatherTracker/
 ├── ffmpeg.exe                     # 视频压制二进制核心
 ├── logs/
 │   └── tracker.log                # 轮转与持久化双写系统日志
+├── deploy/
+│   ├── install_task.ps1           # 注册开机自启计划任务（SYSTEM）
+│   ├── uninstall_task.ps1         # 卸载计划任务
+│   └── watchdog.ps1               # 健康检查失败时重启计划任务
 ├── src/
 │   ├── main.py                    # 进程入口：装配应用并启动 Uvicorn
 │   ├── web.py                     # FastAPI app factory、路由、AppState 与后台协程
@@ -202,6 +207,8 @@ GuangzhouWeatherTracker/
 * **FY4C 回补窗口**：启动 Phase A 补最近 24 小时，Phase B 自适应延伸到目标 48 小时（实测上游当前约保留 24 小时）；常规轮询窗口 4 小时，运行期每 6 小时扫一次历史缺口，10 分钟时间网格
 * **雷达回补窗口**：常规轮询 1 小时，启动及每 30 分钟扫描最近 6 小时缺口，6 分钟网格，抓取并发上限 8；时次成熟 6 分钟后才探测
 * **发布宽限期**：雷达 20 分钟、FY4C 40 分钟，宽限期内 404 不计入"上游缺失"；雷达时次成熟 6 分钟、FY4C 成熟 10 分钟后才发首个请求
+* **健康检查**：启动宽限 180 秒；首轮/信源 tick 静默阈值 600 秒
+* **WebUI 字体**：`Google Sans Flex` 优先，中文回退 `Noto Sans SC`，再回退系统字体；不引入公网字体 CDN
 * **数据时间切片格式**：`%Y%m%d_%H%M%S`
 * **日志轮转**：单文件 10 MB，保留 3 个备份；httpx/httpcore 请求明细降为 WARNING，避免淹没业务日志
 * **视频编码规约**：H.264 / yuv420p / crf 23 / preset fast / `+faststart` / 宏块像素奇偶数向下截断自适应对齐（`-vf scale=trunc(iw/2)*2:trunc(ih/2)*2`）；输出先写 `*.part.mp4`，成功后原子替换，失败自动清理
@@ -231,9 +238,19 @@ New-NetFirewallRule -DisplayName "Weather Tracker Edge Node" -Direction Inbound 
 
 ```
 
-#### 5.3 无头进程后台部署脚本（VBScript）
+#### 5.3 无头进程后台部署（计划任务推荐 / VBS 手动）
 
-禁止在生产节点使用 VS Code 或 CMD 窗口挂留进程，应使用 VBS 脚本调用 `pythonw.exe` 彻底销毁宿主控制台黑框。在根目录下创建 `start_node.vbs`：
+生产节点不应使用 VS Code 或 CMD 窗口挂留进程。推荐由计划任务以 `pythonw.exe` 无窗口启动，并在异常退出时自动重启：
+
+```powershell
+# 管理员 PowerShell，项目根目录
+.\deploy\install_task.ps1
+Start-ScheduledTask -TaskName WeatherTrackerEdgeNode
+```
+
+计划任务名为 `WeatherTrackerEdgeNode`，以 SYSTEM 身份运行，`RestartCount=3`、间隔 1 分钟；`deploy\uninstall_task.ps1` 可卸载。`deploy\watchdog.ps1` 会探测 `/api/health`，失败时停止并重新启动该任务，适合再注册一个每 5 分钟运行一次的计划任务。
+
+如不希望注册计划任务，仍可手动双击 `start_node.vbs`：
 
 ```vbscript
 Set WshShell = CreateObject("WScript.Shell")
@@ -245,9 +262,10 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 
 日常运维及监控：
 
-* **启动**：直接双击 `start_node.vbs`，服务于完全静默状态下拉起。
+* **启动**：`Start-ScheduledTask -TaskName WeatherTrackerEdgeNode`，或双击 `start_node.vbs`。
 * **控制**：在同局域网的任意终端浏览器访问 `http://<i5-4200U局域网IP>:11451`。
-* **终止**：通过 `stop_node.bat` 或者终端执行 `taskkill /f /im pythonw.exe` 收割进程。
+* **健康检查**：`http://<节点IP>:11451/api/health`，200 为 `ok/starting`，503 为 `degraded`。
+* **终止**：`Stop-ScheduledTask -TaskName WeatherTrackerEdgeNode`，或 `stop_node.bat` / `taskkill /f /im pythonw.exe`。
 
 ### 5.4 台式机开发 → 笔记本同步清单
 
@@ -256,6 +274,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 * `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/web.py`、`src/logbus.py`、`src/dashboard.html`
 * `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/jobs.py`、`src/fetch.py`、`src/storage.py`
 * `README.md`、`PRD.md`
+* `deploy\install_task.ps1`、`deploy\uninstall_task.ps1`、`deploy\watchdog.ps1`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
 
 笔记本重启服务后自动生效：启动时 FY4C 先回补最近 24 小时，再按上游实际保留深度自适应延伸到目标 48 小时（当前实测约 24 小时），下载统计从空计数开始累计。每日总结只在 `00:15` 进程在线时触发，启动时不会补跑历史任务。
