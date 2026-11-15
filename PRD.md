@@ -47,7 +47,7 @@
 
 * **内存摘要防重**：下载完整的图片二进制实体后，在内存中计算 `SHA-256` 哈希摘要，与 `.latest_cursor.json` 中的历史哈希对比。即使服务端修改了时间戳，只要图像内容同质，直接丢弃避免重复落盘。
 * **IEND 块校验**：调用 Pillow 对下载的载荷进行 `img.verify()` 校验。能够精准拦截上游服务端因竞态写入（File Contention）导致的截断帧或坏图，校验失败则抛出异常进入指数退避（Exponential Backoff）重试，绝不让损坏的数据污染本地序列。
-* **原子落盘**：图片先写同目录 `*.part` 临时文件，再通过 `os.replace` 原子替换为正式文件名；游标与定时任务状态同样采用原子写。进程被强杀或断电时，正式文件名下不会出现半张图/半个 MP4，残留的 `.part` 由 GC 定时清理。
+* **原子落盘**：图片先写同目录 `*.part` 临时文件，再通过 `os.replace` 原子替换为正式文件名；游标同样采用原子写。进程被强杀或断电时，正式文件名下不会出现半张图/半个 MP4，残留的 `.part` 由 GC 定时清理。
 * **状态码分类重试**：`404` 视为上游缺帧静默跳过；`429/5xx/网络异常/坏图` 进入指数退避重试（尊重 `Retry-After`）；其余 `4xx` 视为永久失败，不做无意义重试。
 
 #### 2.3 动态压制与反向推演算法 (Synthesis & Reverse Deduction Pipeline)
@@ -101,7 +101,7 @@
 
 #### 3.1 运行环境与核心栈
 
-* **开发语言**：Python 3.12+ (采取 `src-layout` 工程标准，由 `uv` 进行全量依赖管理)
+* **开发语言**：Python 3.12+（`src/` 平铺模块，由 `uv` 进行全量依赖管理）
 * **网络与基础通信**：`FastAPI` + `Uvicorn` + `httpx` (支持 HTTP/2 Multiplexing)
 * **并发模型**：`asyncio` 异步事件循环 + 单线程先进先出队列
 * **底层编码驱动**：静态链接版 `ffmpeg.exe`（直接调用二进制指令进行 `image2pipe` YUV420P 转换）
@@ -119,7 +119,7 @@
 └──────┬───────────────────────────────────────────────────────────────┘
        │ (Atomic Rename write to disk)
        ▼
-[ Local Disk: /data/{img_type}/YYYYMMDD/ ] ──(read pointer)──► [ Stats Observer ] ──► (WebUI API)
+[ Local Disk: /data/{img_type}/YYYYMMDD/ ] ──(FrameCatalog/游标)──► [ Stats Observer ] ──► (WebUI API)
        ▲                                                                 
        │ (rglob scan)                                                    
 ┌──────┴────────────────────────────┐    ┌─────────────────────────────┐
@@ -128,7 +128,7 @@
                                                         │ (Put Task)
 [ WebUI User Request ] ──(POST /api/synthesize)─────────┴───┐
                                                             ▼
-                                                [ SYNTH_QUEUE (FIFO) ]
+                                                [ JobManager.queue (FIFO + Job 状态) ]
                                                             │ (Get Task)
                                                             ▼
                                               [ Synthesis Worker ] ──(subprocess)──► [ ffmpeg.exe ]
@@ -139,7 +139,7 @@
 2. **`stats_loop()`**：UI 观察者协程。为了不占用 I/O 导致老硬盘卡顿，它**从不全量扫盘**。计算新增数时只对比各分类下的 `.latest_cursor.json` 的字符串哈希；计算 24 小时可用帧时，严格限缩在 `now` 与 `now - 1 day` 两个物理日期文件夹内。
 3. **`gc_loop()`**：非阻塞定时清理协程。
 4. **`cron_loop()`**：每日 00:15 准点定时任务调度协程。
-5. **`synthesis_worker()`**：队列消费协程。无论前端下发多少个视频合成命令，队列消费严格串行化。通过 `asyncio.to_thread` 将阻塞的 FFmpeg 调用抛入底层线程池执行。任务间隔强制安插 5 秒冷却期（Cooldown），保障低负载平台 CPU 散温不降频。
+5. **`synthesis_worker()`**：队列消费协程。无论前端下发多少个视频合成命令，队列消费严格串行化。通过 `asyncio.to_thread` 将阻塞的 FFmpeg 调用抛入底层线程池执行。定时任务完成后强制 5 秒冷却期（Cooldown），手动任务连续执行不额外等待，保障低负载平台 CPU 散温不降频。
 
 ---
 
