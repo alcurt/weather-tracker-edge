@@ -140,7 +140,8 @@ def get_dynamic_fps(hours: int) -> float:
 def _load_cron_state() -> dict:
     try:
         with open(CRON_STATE_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -221,6 +222,8 @@ def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, dir_c
                     try:
                         with os.scandir(date_dir) as entries:
                             for entry in entries:
+                                if not entry.name.endswith(".png"):
+                                    continue
                                 ts = parse_frame_timestamp(entry.name)
                                 if ts is not None:
                                     day_timestamps.append(ts)

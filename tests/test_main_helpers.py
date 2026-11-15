@@ -48,6 +48,23 @@ def test_cron_state_round_trip(tmp_path, monkeypatch):
     assert main._load_cron_state()["last_done_date"] == "20260101"
 
 
+def test_collect_stats_ignores_part_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(main, "all_target_keys", ["TempC"])
+    monkeypatch.setattr(main, "flat_display_map", {"TempC": "气温填色图"})
+
+    date_dir = tmp_path / "TempC" / "20260101"
+    date_dir.mkdir(parents=True)
+    (date_dir / "20260101_120000_TempC.png").write_bytes(b"x")
+    (date_dir / "20260101_121000_TempC.png.part").write_bytes(b"partial")
+
+    records = main.collect_stats(
+        datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8), {"TempC": 0}, {"TempC": ""}, {}
+    )
+    assert records[0]["avail_24h"] == 1
+    assert records[0]["latest_time"] == "12:00"
+
+
 def test_collect_stats_recomputes_hourly_as_time_moves(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main, "all_target_keys", ["TempC"])

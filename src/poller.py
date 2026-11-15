@@ -124,8 +124,8 @@ class AsyncPoller:
             # 守护进程不应继承桌面环境的代理设置（含格式异常时 httpx 会直接构造失败）
             trust_env=False,
             limits=httpx.Limits(
-                max_connections=32,
-                max_keepalive_connections=8,
+                max_connections=64,
+                max_keepalive_connections=16,
                 keepalive_expiry=30.0,
             ),
         )
