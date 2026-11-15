@@ -53,17 +53,50 @@ def test_static_404_still_counted_as_missing(monkeypatch):
     assert stats.missing == [("TempC", "static")]
 
 
-def test_has_recent_frames_detects_local_data(tmp_path, monkeypatch):
-    monkeypatch.setattr(poller_module, "DATA_DIR", tmp_path)
-    now = datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8)
-    recent = tmp_path / "FY4C" / "20260102" / "20260102_113000_FY4C.png"
-    recent.parent.mkdir(parents=True)
-    recent.write_bytes(b"x")
+def test_grid_slots_are_newest_first():
+    now = datetime(2026, 1, 2, 12, 3, tzinfo=TZ_UTC8)
+    slots = poller_module.AsyncPoller._grid_slots(now, 10, 0, 60)
+    assert slots[0] == datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8)
+    assert slots[-1] == datetime(2026, 1, 2, 11, 0, tzinfo=TZ_UTC8)
+    assert len(slots) == 7
+
+    inner = poller_module.AsyncPoller._grid_slots(now, 10, 20, 60)
+    assert inner[0] == datetime(2026, 1, 2, 11, 40, tzinfo=TZ_UTC8)
+    assert inner[-1] == datetime(2026, 1, 2, 11, 0, tzinfo=TZ_UTC8)
+    assert len(inner) == 5
+
+
+def test_available_nmc_minutes_binary_search():
+    async def fake_probe(img_type, now, minutes):
+        return minutes <= 1500
 
     poller = object.__new__(poller_module.AsyncPoller)
-    assert poller._has_recent_frames("FY4C", now, 1) is True
-    assert poller._has_recent_frames("FY4C", now, 0) is False
-    assert poller._has_recent_frames("RadarGZ", now, 1) is False
+    poller._probe_nmc_depth = fake_probe
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=TZ_UTC8)
+
+    available = asyncio.run(poller._available_nmc_minutes("FY4C", now, 48 * 60))
+    assert available == 1500
+
+
+def test_backfill_nmc_source_runs_two_phases(monkeypatch):
+    async def fake_available(img_type, now, target_minutes):
+        return 1500  # 上游实际只有 25 小时
+
+    calls = []
+
+    async def fake_fetch(img_type, slots, label):
+        calls.append((label, len(slots)))
+        return {}
+
+    poller = object.__new__(poller_module.AsyncPoller)
+    poller._available_nmc_minutes = fake_available
+    poller._fetch_nmc_slots = fake_fetch
+    monkeypatch.setattr(poller_module, "NMC_BACKFILL_PHASE_GAP_SECONDS", 0)
+
+    asyncio.run(poller._backfill_nmc_source("FY4C"))
+    assert [label for label, _ in calls] == ["0-24.0h", "24.0-25.0h"]
+    assert calls[0][1] == 144  # 0-24h 中排除未成熟的当前时次
+    assert calls[1][1] == 6    # 24-25h 的 6 个时次
 
 
 def test_radar_backfill_only_probes_mature_slots():

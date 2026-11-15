@@ -21,9 +21,11 @@ from config import (
     MAX_RETRIES,
     NMC_BACKFILL_BATCH_SIZE,
     NMC_BACKFILL_CONCURRENCY,
-    NMC_BACKFILL_DAYS,
-    NMC_BACKFILL_RECENT_HOURS,
+    NMC_BACKFILL_PHASE_GAP_SECONDS,
+    NMC_BACKFILL_START_HOURS,
+    NMC_BACKFILL_TARGET_HOURS,
     NMC_BATCH_PAUSE_SECONDS,
+    NMC_GAP_SWEEP_INTERVAL_MINUTES,
     NMC_MIN_AGE_MINUTES,
     NMC_PENDING_GRACE_MINUTES,
     NMC_POLL_WINDOW_HOURS,
@@ -478,61 +480,81 @@ class AsyncPoller:
                 return "CRASH"
         return "TIMEOUT"
 
-    def _has_recent_frames(self, img_type: str, now: datetime, hours: int) -> bool:
-        """判断本地是否已有最近 N 小时的帧，用于跳过启动时的全量回补。"""
-        cutoff = now - timedelta(hours=hours)
-        type_dir = DATA_DIR / img_type
-        for days_back in (0, 1):
-            date_dir = type_dir / (now - timedelta(days=days_back)).strftime("%Y%m%d")
-            if not date_dir.is_dir():
-                continue
+    @staticmethod
+    def _grid_slots(now: datetime, step_minutes: int, newest_minutes: int, oldest_minutes: int) -> list:
+        """生成 [newest, oldest] 区间内的理论时次，按从新到旧排序。"""
+        base_time = now.replace(
+            minute=(now.minute // step_minutes) * step_minutes,
+            second=0,
+            microsecond=0,
+        )
+        newest = base_time - timedelta(minutes=newest_minutes)
+        oldest = base_time - timedelta(minutes=oldest_minutes)
+        slots = []
+        current = newest
+        while current >= oldest:
+            slots.append(current)
+            current -= timedelta(minutes=step_minutes)
+        return slots
+
+    async def _probe_nmc_depth(self, img_type: str, now: datetime, depth_minutes: int) -> bool:
+        """探测指定深度上是否有上游时次；抽样两个相邻时次，避免单帧缺帧误判。"""
+        step_minutes = NMC_SATELLITE_TYPES[img_type]["interval_minutes"]
+        base_time = now.replace(
+            minute=(now.minute // step_minutes) * step_minutes,
+            second=0,
+            microsecond=0,
+        )
+        for target_time in (
+            base_time - timedelta(minutes=depth_minutes),
+            base_time - timedelta(minutes=depth_minutes + step_minutes),
+        ):
+            url = build_nmc_url(img_type, target_time)
             try:
-                with os.scandir(date_dir) as entries:
-                    for entry in entries:
-                        if not entry.name.endswith(".png"):
-                            continue
-                        ts = parse_frame_timestamp(entry.name)
-                        if ts is not None and ts >= cutoff:
-                            return True
-            except OSError:
-                continue
+                response = await self.client.head(url)
+                if response.status_code == 200:
+                    return True
+                # 少数 CDN 对 HEAD 返回 405，退回流式 GET 只看状态码
+                if response.status_code == 405:
+                    async with self.client.stream("GET", url) as stream:
+                        return stream.status_code == 200
+            except httpx.RequestError:
+                return False
         return False
 
-    async def _backfill_nmc_source(self, img_type: str):
-        """首次接入回补扫描：按时间网格枚举最近 N 天理论时次，分批并发抓取"""
-        cfg = NMC_SATELLITE_TYPES[img_type]
-        step_minutes = cfg["interval_minutes"]
-        step = timedelta(minutes=step_minutes)
-        now = datetime.now(TZ_UTC8)
+    async def _available_nmc_minutes(self, img_type: str, now: datetime, target_minutes: int) -> int:
+        """二分探测上游实际保留深度，返回可用分钟数；60 分钟处都不可用则返回 0。"""
+        step_minutes = NMC_SATELLITE_TYPES[img_type]["interval_minutes"]
+        low = max(60, step_minutes * 6)
+        if not await self._probe_nmc_depth(img_type, now, low):
+            return 0
+        if await self._probe_nmc_depth(img_type, now, target_minutes):
+            return target_minutes
 
-        # 常规重启时最近窗口已有数据，无需每次重扫 3 天（约 430 个时次）
-        if self._has_recent_frames(img_type, now, NMC_BACKFILL_RECENT_HOURS):
-            logger.info(
-                f"[{img_type}] 最近 {NMC_BACKFILL_RECENT_HOURS} 小时已有本地帧，跳过启动全量回补。"
-            )
-            return
+        lo, hi = low, target_minutes
+        while hi - lo > step_minutes:
+            mid = ((lo + hi) // 2 // step_minutes) * step_minutes
+            if mid <= lo or mid >= hi:
+                break
+            if await self._probe_nmc_depth(img_type, now, mid):
+                lo = mid
+            else:
+                hi = mid
+        return lo
 
-        base_time = now.replace(minute=(now.minute // step_minutes) * step_minutes, second=0, microsecond=0)
-        end_time = base_time - timedelta(days=NMC_BACKFILL_DAYS)
+    async def _fetch_nmc_slots(self, img_type: str, slots: list, label: str) -> dict:
+        """按批次抓取一组历史时次；回补阶段每槽只尝试一次，失败留给下一轮。"""
+        counts = {"200": 0, "EXIST": 0, "404": 0, "FAIL": 0}
+        if not slots:
+            return counts
 
-        slots = []
-        t = base_time
-        while t >= end_time:
-            slots.append(t)
-            t -= step
-        slots = [t for t in slots if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES)]
-
-        logger.info(
-            f"[{img_type}] 开始首次回补扫描：{len(slots)} 个理论时次"
-            f"（最近 {NMC_BACKFILL_DAYS} 天，{step_minutes} 分钟步进）..."
-        )
+        logger.info(f"[{img_type}] 回补 {label}：{len(slots)} 个时次...")
         semaphore = asyncio.Semaphore(NMC_BACKFILL_CONCURRENCY)
 
-        async def fetch_one(target_time: datetime) -> str:
-            async with semaphore:
+        async def fetch_one(target_time: datetime, sem: asyncio.Semaphore = semaphore) -> str:
+            async with sem:
                 return await self._fetch_single_nmc(img_type, target_time, max_retries=0)
 
-        counts = {"200": 0, "EXIST": 0, "404": 0, "FAIL": 0}
         for i in range(0, len(slots), NMC_BACKFILL_BATCH_SIZE):
             await self._ensure_client()
             batch = slots[i:i + NMC_BACKFILL_BATCH_SIZE]
@@ -544,21 +566,64 @@ class AsyncPoller:
                 count_missing=False, count_fail=False,
             )
             self._mark_probe_results(pairs, results)
-            for r in results:
-                counts[r if r in ("200", "EXIST", "404") else "FAIL"] += 1
+            for result in results:
+                counts[result if result in ("200", "EXIST", "404") else "FAIL"] += 1
             if i + NMC_BACKFILL_BATCH_SIZE < len(slots):
                 await asyncio.sleep(NMC_BATCH_PAUSE_SECONDS)
-        await download_stats.flush()
 
         logger.info(
-            f"[{img_type}] 回补扫描完成：新增 {counts['200']} 张，"
+            f"[{img_type}] 回补 {label} 完成：新增 {counts['200']} 张，"
             f"已存在 {counts['EXIST']} 张，上游缺失 {counts['404']} 个时次，失败 {counts['FAIL']} 个。"
         )
+        return counts
+
+    async def _backfill_nmc_source(self, img_type: str):
+        """两阶段自适应回补：先补最近 24 小时，再按上游实际保留深度延伸到目标 48 小时。"""
+        cfg = NMC_SATELLITE_TYPES[img_type]
+        step_minutes = cfg["interval_minutes"]
+        now = datetime.now(TZ_UTC8)
+
+        available_minutes = await self._available_nmc_minutes(
+            img_type, now, NMC_BACKFILL_TARGET_HOURS * 60
+        )
+        if available_minutes <= 0:
+            logger.warning(f"[{img_type}] 上游探测不到可回补时次，跳过本轮回补。")
+            return
+
+        logger.info(
+            f"[{img_type}] 上游可用回补深度约 {available_minutes / 60:.1f} 小时"
+            f"（启动目标 {NMC_BACKFILL_START_HOURS}h，扩展目标 {NMC_BACKFILL_TARGET_HOURS}h）"
+        )
+
+        phase1_end = min(available_minutes, NMC_BACKFILL_START_HOURS * 60)
+        phase1_slots = [
+            t for t in self._grid_slots(now, step_minutes, 0, phase1_end)
+            if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES)
+        ]
+        await self._fetch_nmc_slots(img_type, phase1_slots, f"0-{phase1_end / 60:.1f}h")
+
+        if available_minutes > phase1_end:
+            await asyncio.sleep(NMC_BACKFILL_PHASE_GAP_SECONDS)
+            phase2_slots = [
+                t for t in self._grid_slots(
+                    now,
+                    step_minutes,
+                    phase1_end + step_minutes,
+                    available_minutes,
+                )
+                if slot_is_mature(now, t, NMC_MIN_AGE_MINUTES)
+            ]
+            await self._fetch_nmc_slots(
+                img_type, phase2_slots, f"{phase1_end / 60:.1f}-{available_minutes / 60:.1f}h"
+            )
+
+        await download_stats.flush()
 
     async def _loop_nmc_source(self, img_type: str):
-        """中央台卫星源专属协程：回补后进入 4 小时滑动窗口增量探测"""
+        """中央台卫星源专属协程：两阶段回补后进入 4 小时增量探测，并周期补历史缺口。"""
         logger.info(f"[{img_type}] 独立中央台卫星源监听线程启动...")
         await self._backfill_nmc_source(img_type)
+        last_sweep = time.time()
 
         while True:
             start_time = time.time()
@@ -566,6 +631,9 @@ class AsyncPoller:
 
             try:
                 await self._ensure_client()
+                if time.time() - last_sweep >= NMC_GAP_SWEEP_INTERVAL_MINUTES * 60:
+                    await self._backfill_nmc_source(img_type)
+                    last_sweep = time.time()
                 cfg = NMC_SATELLITE_TYPES[img_type]
                 step_minutes = cfg["interval_minutes"]
                 now = datetime.now(TZ_UTC8)

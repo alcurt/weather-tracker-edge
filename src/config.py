@@ -72,11 +72,13 @@ NMC_SATELLITE_TYPES = {
     }
 }
 
-NMC_BACKFILL_DAYS = 3          # 首次接入回补天数
-NMC_POLL_WINDOW_HOURS = 4      # 常规轮询滑动窗口（小时）
+NMC_BACKFILL_START_HOURS = 24   # 启动先补最近 24 小时
+NMC_BACKFILL_TARGET_HOURS = 48  # 自适应目标：上游保留更久则继续补到 48 小时
+NMC_BACKFILL_PHASE_GAP_SECONDS = 60  # 两阶段之间稍作停顿，避免连续压 CDN
+NMC_GAP_SWEEP_INTERVAL_MINUTES = 360  # 运行期每 6 小时扫一次历史缺口
+NMC_POLL_WINDOW_HOURS = 4      # 常规轮询滑动窗口（小时），只负责新鲜帧
 NMC_BACKFILL_BATCH_SIZE = 18   # 回补每批并发时次数
 NMC_BACKFILL_CONCURRENCY = 8   # 回补全局并发上限
 NMC_BATCH_PAUSE_SECONDS = 1.0  # 批间停顿，避免压垮上游 CDN
 NMC_PENDING_GRACE_MINUTES = 40  # 超过该年龄仍 404 才计入"上游缺失"
-NMC_BACKFILL_RECENT_HOURS = 4   # 本地最新帧在该窗口内则跳过启动全量回补
 NMC_MIN_AGE_MINUTES = 10        # 时次至少成熟 10 分钟才探测，避免发布前必然 404
