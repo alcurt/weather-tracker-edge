@@ -3,23 +3,31 @@ import collections
 import json
 import logging
 import os
+import socket
 import sys
 import time
-import socket
-from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from config import TARGET_URLS, RADAR_TYPES, TZ_UTC8, DATA_DIR
-from poller import AsyncPoller
-from synthesizer import Synthesizer
+from analytics import (
+    compute_available_ranges,
+    parse_frame_timestamp,
+    scan_videos,
+    summarize_24h,
+)
 from cleaner import StorageCleaner
+from config import DATA_DIR, TZ_UTC8
 from download_stats import download_stats
+from poller import AsyncPoller
+from storage import atomic_write_json
+from synthesizer import Synthesizer
 
 # ==========================================
 # 记录服务器物理启动时间的绝对锚点
@@ -42,7 +50,6 @@ def get_local_ip():
 
 ROOT_DIR = DATA_DIR.parent
 LOG_DIR = ROOT_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_BUFFER = collections.deque(maxlen=200)
 
@@ -53,15 +60,39 @@ class MemoryLogHandler(logging.Handler):
 memory_handler = MemoryLogHandler()
 memory_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_DIR / "tracker.log", encoding="utf-8"),
-        memory_handler
-    ]
-)
+_logging_configured = False
+
+
+def configure_logging() -> None:
+    """配置控制台 + 轮转文件 + 内存终端三路日志。
+
+    只在入口调用，避免 import main 时产生文件写入等副作用（便于测试）。
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            RotatingFileHandler(
+                LOG_DIR / "tracker.log",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            ),
+            memory_handler,
+        ],
+        force=True,
+    )
+    # 上游请求明细由采集器自己记录，保留 httpx 的 INFO 会淹没业务日志
+    for noisy in ("httpx", "httpcore", "uvicorn.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    _logging_configured = True
+
+
 logger = logging.getLogger(__name__)
 
 # ==========================================
@@ -96,130 +127,144 @@ all_target_keys = list(flat_display_map.keys())
 
 # 每日 00:15 昨日总结排除的信源（四个 B 类分布图取消；FY4C 纳入定时任务）
 CRON_EXCLUDED_TYPES = {"TempB", "RainB", "Rain24hB", "WindB"}
+CRON_STATE_FILE = DATA_DIR / "state" / "cron.json"
+
+SUPPORTED_HOURS = (1, 3, 6, 12, 24)
+
+FPS_BY_HOURS = {1: 4.0, 3: 6.0, 6: 8.0, 12: 9.6, 24: 14.4}
 
 def get_dynamic_fps(hours: int) -> float:
-    if hours == 1: return 4.0
-    elif hours == 3: return 6.0
-    elif hours == 6: return 8.0
-    elif hours == 12: return 9.6
-    elif hours == 24: return 14.4
-    else: return 10.0
+    return FPS_BY_HOURS.get(hours, 10.0)
+
+
+def _load_cron_state() -> dict:
+    try:
+        with open(CRON_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cron_state(target_date: str) -> None:
+    atomic_write_json(
+        CRON_STATE_FILE,
+        {
+            "last_done_date": target_date,
+            "updated_at": datetime.now(TZ_UTC8).isoformat(),
+        },
+    )
+
+
+def cron_target(now: datetime, last_done: str) -> str | None:
+    """返回需要补跑的昨日日期；None 表示本轮不触发。
+
+    00:15 之前不触发，给 23:xx 的最后一帧留出抓取窗口；last_done 晚于目标
+    （时钟回拨）时也跳过，避免重复合成。
+    """
+    if not (now.hour > 0 or now.minute >= 15):
+        return None
+    target_date = (now - timedelta(days=1)).strftime("%Y%m%d")
+    if last_done == target_date:
+        return None
+    if last_done and last_done > target_date:
+        return None
+    return target_date
 
 # ==========================================
 # 后台异步守护协程 (元数据门铃监听)
 # ==========================================
+def collect_stats(now: datetime, session_counts: dict, last_cursors: dict, dir_cache: dict) -> list:
+    """采集一次 UI 聚合数据（纯同步，便于单测）。
+
+    dir_cache 只缓存"目录 mtime -> 原始时间戳列表"，聚合值每次按 now 现算，
+    因此时间推移不会让覆盖带/24h 帧数停留在旧位置。
+    """
+    records = []
+    active_dates = {
+        (k, (now - timedelta(days=days_back)).strftime("%Y%m%d"))
+        for k in all_target_keys
+        for days_back in (0, 1)
+    }
+    for stale_key in [key for key in dir_cache if key not in active_dates]:
+        dir_cache.pop(stale_key, None)
+
+    for k in all_target_keys:
+        # 1. 游标对比计算本次会话新增（近似值：每 5 秒采样一次）
+        cursor_file = DATA_DIR / k / ".latest_cursor.json"
+        if cursor_file.exists():
+            try:
+                with open(cursor_file, encoding="utf-8") as f:
+                    current_path = json.load(f).get("file_path", "")
+                    if current_path and last_cursors[k] and current_path != last_cursors[k]:
+                        session_counts[k] += 1
+                    last_cursors[k] = current_path
+            except Exception:
+                pass
+
+        # 2. 元数据门铃：只读取今天和昨天两个目录，mtime 不变则不重扫
+        timestamps = []
+        type_dir = DATA_DIR / k
+        if type_dir.exists():
+            for days_back in (0, 1):
+                date_str = (now - timedelta(days=days_back)).strftime("%Y%m%d")
+                date_dir = type_dir / date_str
+                if not date_dir.is_dir():
+                    continue
+                try:
+                    current_mtime = date_dir.stat().st_mtime
+                except OSError:
+                    continue
+                cache_key = (k, date_str)
+                cached = dir_cache.get(cache_key)
+                if cached is None or cached["mtime"] != current_mtime:
+                    day_timestamps = []
+                    try:
+                        with os.scandir(date_dir) as entries:
+                            for entry in entries:
+                                ts = parse_frame_timestamp(entry.name)
+                                if ts is not None:
+                                    day_timestamps.append(ts)
+                    except OSError:
+                        continue
+                    cached = {"mtime": current_mtime, "timestamps": day_timestamps}
+                    dir_cache[cache_key] = cached
+                timestamps.extend(cached["timestamps"])
+
+        summary = summarize_24h(timestamps, now)
+        latest_ts = max(timestamps) if timestamps else None
+
+        records.append({
+            "key": k,
+            "display_name": flat_display_map[k],
+            "avail_24h": summary["count"],
+            "session_dl": session_counts[k],
+            "hourly": summary["hourly"],
+            "latest_time": latest_ts.strftime("%H:%M") if latest_ts else "--:--",
+            "earliest_time": summary["earliest"].strftime("%H:%M") if summary["earliest"] else "--:--",
+        })
+    return records
+
+
 async def stats_loop():
-    """采用文件系统元数据门铃 (st_mtime)：完美兼容 U 盘热插拔且在无变动时降为绝对零 I/O"""
     session_counts = {k: 0 for k in all_target_keys}
     last_cursors = {k: "" for k in all_target_keys}
-    
-    # 内存缓存结构：{(img_type, YYYYMMDD): {"mtime": float, "count": int}}
-    dir_mtime_cache = {}
+
+    # 内存缓存：{(img_type, YYYYMMDD): {"mtime": float, "timestamps": [datetime]}}
+    dir_cache = {}
 
     for k in all_target_keys:
         cursor_file = DATA_DIR / k / ".latest_cursor.json"
         if cursor_file.exists():
             try:
-                with open(cursor_file, 'r', encoding='utf-8') as f:
+                with open(cursor_file, encoding="utf-8") as f:
                     last_cursors[k] = json.load(f).get("file_path", "")
             except Exception:
                 pass
 
     while True:
         try:
-            records = []
             now = datetime.now(TZ_UTC8)
-            cutoff_24h_str = (now - timedelta(hours=24)).strftime("%Y%m%d_%H%M%S")
-            
-            for k in all_target_keys:
-                # 1. O(1) 游标对比计算本次会话新增
-                cursor_file = DATA_DIR / k / ".latest_cursor.json"
-                if cursor_file.exists():
-                    try:
-                        with open(cursor_file, 'r', encoding='utf-8') as f:
-                            current_path = json.load(f).get("file_path", "")
-                            if current_path and last_cursors[k] and current_path != last_cursors[k]:
-                                session_counts[k] += 1
-                            last_cursors[k] = current_path
-                    except Exception:
-                        pass
-
-                # 2. 元数据门铃：只通过 os.scandir 检查今天和昨天的目录 mtime
-                count_24h = 0
-                hourly = [0] * 24
-                earliest_ts = None
-                type_dir = DATA_DIR / k
-                if type_dir.exists():
-                    for days_back in [0, 1]:
-                        date_str = (now - timedelta(days=days_back)).strftime("%Y%m%d")
-                        date_dir = type_dir / date_str
-                        if not date_dir.exists() or not date_dir.is_dir():
-                            continue
-                        
-                        try:
-                            current_mtime = date_dir.stat().st_mtime
-                        except Exception:
-                            continue
-                            
-                        cache_key = f"{k}_{date_str}"
-                        # 如果文件夹元数据没有变动（无网络写入也无手动复制），直接秒弹缓存！
-                        if cache_key in dir_mtime_cache and dir_mtime_cache[cache_key]["mtime"] == current_mtime:
-                            count_24h += dir_mtime_cache[cache_key]["count"]
-                            cached_hourly = dir_mtime_cache[cache_key]["hourly"]
-                            for i in range(24):
-                                hourly[i] += cached_hourly[i]
-                            cached_earliest = dir_mtime_cache[cache_key].get("earliest")
-                            if cached_earliest and (earliest_ts is None or cached_earliest < earliest_ts):
-                                earliest_ts = cached_earliest
-                        else:
-                            # 门铃被敲响！使用轻量级的 C-API 迭代器 scandir，不解析字符串，极速计件
-                            valid_count = 0
-                            dir_hourly = [0] * 24
-                            dir_earliest = None
-                            with os.scandir(date_dir) as entries:
-                                for entry in entries:
-                                    if entry.name.endswith(".png"):
-                                        # 截取文件名头部快速对比时间，彻底告别 strptime
-                                        if entry.name[:15] >= cutoff_24h_str[:15]:
-                                            valid_count += 1
-                                            try:
-                                                dt = datetime.strptime(entry.name[:14], "%Y%m%d_%H%M%S").replace(tzinfo=TZ_UTC8)
-                                                idx = int((now - dt).total_seconds() // 3600)
-                                                if 0 <= idx < 24:
-                                                    dir_hourly[idx] += 1
-                                                if dir_earliest is None or dt < dir_earliest:
-                                                    dir_earliest = dt
-                                            except ValueError:
-                                                pass
-                            dir_mtime_cache[cache_key] = {
-                                "mtime": current_mtime, "count": valid_count, "hourly": dir_hourly, "earliest": dir_earliest
-                            }
-                            count_24h += valid_count
-                            for i in range(24):
-                                hourly[i] += dir_hourly[i]
-                            if dir_earliest and (earliest_ts is None or dir_earliest < earliest_ts):
-                                earliest_ts = dir_earliest
-                
-                latest_time = "--:--"
-                if last_cursors[k]:
-                    try:
-                        latest_time = datetime.strptime(
-                            os.path.basename(last_cursors[k])[:14], "%Y%m%d_%H%M%S"
-                        ).strftime("%H:%M")
-                    except Exception:
-                        pass
-
-                records.append({
-                    "key": k,
-                    "display_name": flat_display_map[k],
-                    "avail_24h": count_24h,
-                    "session_dl": session_counts[k],
-                    "hourly": hourly,
-                    "latest_time": latest_time,
-                    "earliest_time": earliest_ts.strftime("%H:%M") if earliest_ts else "--:--",
-                })
-                
-            GLOBAL_STATS["records"] = records
+            GLOBAL_STATS["records"] = collect_stats(now, session_counts, last_cursors, dir_cache)
             GLOBAL_STATS["last_updated"] = now.strftime("%H:%M:%S")
         except Exception as e:
             logger.error(f"UI数据观测者发生异常: {e}")
@@ -240,43 +285,58 @@ async def gc_loop():
             await asyncio.sleep(300)
 
 async def cron_loop():
-    last_triggered_date = None
+    """每日 00:15 之后触发昨日总结；状态落盘，启动后可补跑最近一天。"""
     while True:
         try:
             now = datetime.now(TZ_UTC8)
-            if now.hour == 0 and now.minute == 15 and last_triggered_date != now.date():
-                cron_count = len(flat_display_map) - len(CRON_EXCLUDED_TYPES)
-                logger.info(f"触发 00:15 每日总结，准备向队列压入 {cron_count} 个后台合成任务。")
-                last_triggered_date = now.date()
-                for k, v in flat_display_map.items():
-                    if k in CRON_EXCLUDED_TYPES:
-                        continue
+            state = await asyncio.to_thread(_load_cron_state)
+            last_done = str(state.get("last_done_date") or "")
+            target_date = cron_target(now, last_done)
+            if target_date:
+                if not last_done:
+                    logger.info("[Cron] 未找到任务状态，补跑昨日总结。")
+                elif last_done < (now - timedelta(days=2)).strftime("%Y%m%d"):
+                    logger.warning(
+                        f"[Cron] 上次完成日期为 {last_done}，仅补跑最近一天 {target_date}。"
+                    )
+                tasks = [
+                    (k, v) for k, v in flat_display_map.items()
+                    if k not in CRON_EXCLUDED_TYPES
+                ]
+                logger.info(f"触发昨日总结，准备向队列压入 {len(tasks)} 个后台合成任务。")
+                for k, v in tasks:
                     await SYNTH_QUEUE.put({
                         "img_type": k,
                         "display_name": f"{v} (昨日总结)",
                         "hours": 24,
                         "is_cron": True
                     })
+                # 等全部任务完成再标记，崩溃则下次启动重跑（重复写入同一文件名，幂等）
+                await SYNTH_QUEUE.join()
+                await asyncio.to_thread(_save_cron_state, target_date)
+                logger.info(f"[Cron] 昨日总结已全部完成，状态写入 {target_date}。")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"每日总结定时器异常: {e}")
-        await asyncio.sleep(10)
+        await asyncio.sleep(30)
 
 async def synthesis_worker():
     global SYNTH_STATUS
     while True:
+        task = await SYNTH_QUEUE.get()
         try:
-            task = await SYNTH_QUEUE.get()
             img_type = task["img_type"]
             display_name = task["display_name"]
             fps = get_dynamic_fps(task["hours"])
             is_cron = task.get("is_cron", False)
-            
+
             SYNTH_STATUS = {
-                "is_running": True, 
-                "message": f"正在后台压制 {display_name} (队列计算中...)", 
+                "is_running": True,
+                "message": f"正在后台压制 {display_name} (队列计算中...)",
                 "type": "warning"
             }
-            
+
             synth = Synthesizer()
             try:
                 success = await asyncio.to_thread(
@@ -288,13 +348,16 @@ async def synthesis_worker():
                     SYNTH_STATUS = {"is_running": False, "message": f"[{display_name}] 合成失败，请检查数据完整性。", "type": "error"}
             except Exception as e:
                 SYNTH_STATUS = {"is_running": False, "message": f"[{display_name}] 管线崩溃: {str(e)}", "type": "error"}
-                
+
             if is_cron:
                 await asyncio.sleep(5)
-            SYNTH_QUEUE.task_done()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"合成工作机致命异常: {e}")
             await asyncio.sleep(1)
+        finally:
+            SYNTH_QUEUE.task_done()
 
 # ==========================================
 # FastAPI 引擎
@@ -310,8 +373,19 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(synthesis_worker())
     ]
     logger.info("系统总线接入完毕，所有异步守护任务已激活并由护城河保护。")
-    yield
-    for t in tasks: t.cancel()
+    try:
+        yield
+    finally:
+        for t in tasks:
+            t.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"守护任务退出时抛出异常: {result}")
+        # 采集子任务与连接池由 poller 统一收尾
+        await poller.shutdown()
+        await download_stats.flush()
+        logger.info("系统已停止，采集任务与连接池已释放。")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -327,7 +401,6 @@ def parse_start_time(value: str) -> datetime:
 
 
 RANGE_GRANULARITY_MINUTES = 30
-SLOTS_PER_DAY = 24 * 60 // RANGE_GRANULARITY_MINUTES  # 48
 
 # 时间轴结果缓存：数据文件每 2 分钟才新增，短 TTL 足够，
 # 且避免浏览器每次刷新/切换跨度都触发全量扫盘卡死事件循环
@@ -335,110 +408,17 @@ RANGES_CACHE_TTL = 60
 _ranges_cache = {}  # (img_type, hours) -> (expire_ts, data)
 
 
-
-def compute_available_ranges(img_type: str, hours: int) -> dict:
-    """扫描本地帧，返回 30 分钟粒度时间轴数据。
-
-    每个日期给出 48 个 30 分钟桶的帧存在性（buckets），并列出可用起点
-    （跨度覆盖的每个 30 分钟桶至少 1 帧，支持跨日）。
-    """
-    result = {"granularity_minutes": RANGE_GRANULARITY_MINUTES, "dates": []}
-    type_dir = DATA_DIR / img_type
-    if not type_dir.exists() or hours <= 0:
-        return result
-
-    now = datetime.now(TZ_UTC8)
-    bucket_sets = {}  # date_str -> set of bucket index (0..47)
-    for days_back in range(7):
-        date_str = (now - timedelta(days=days_back)).strftime("%Y%m%d")
-        date_dir = type_dir / date_str
-        if not date_dir.is_dir():
-            continue
-        indices = set()
-        try:
-            with os.scandir(date_dir) as entries:
-                for entry in entries:
-                    name = entry.name
-                    # 文件名形如 YYYYMMDD_HHMMSS_type.png：直接切片取小时分钟，跳过 strptime
-                    if name.endswith(".png") and len(name) >= 14 and name[8] == "_":
-                        try:
-                            hh = int(name[9:11])
-                            mm = int(name[11:13])
-                        except ValueError:
-                            continue
-                        indices.add((hh * 60 + mm) // RANGE_GRANULARITY_MINUTES)
-        except OSError:
-            continue
-        if indices:
-            bucket_sets[date_str] = indices
-
-    if not bucket_sets:
-        return result
-
-    # 日期序数 -> 日期字符串 映射：跨日判定退化为整数 + 字典查找，避免逐槽 timedelta/strftime
-    ord_map = {}
-    for ds in bucket_sets:
-        try:
-            ord_map[datetime.strptime(ds, "%Y%m%d").toordinal()] = ds
-        except ValueError:
-            continue
-
-    covered_slots = hours * 60 // RANGE_GRANULARITY_MINUTES
-    max_missing_slots = 4 if covered_slots >= 48 else 0
-    minutes_per_day = 24 * 60
-
-    for date_str, indices in bucket_sets.items():
-        buckets = [1 if i in indices else 0 for i in range(SLOTS_PER_DAY)]
-        try:
-            date_base = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=TZ_UTC8)
-        except ValueError:
-            continue
-        date_ord = date_base.toordinal()
-        available = []
-        for start_idx in range(SLOTS_PER_DAY):
-            missing_slots = 0
-            start_min = start_idx * RANGE_GRANULARITY_MINUTES
-            for k in range(covered_slots):
-                total_min = start_min + k * RANGE_GRANULARITY_MINUTES
-                day_offset = total_min // minutes_per_day
-                slot_idx = (total_min % minutes_per_day) // RANGE_GRANULARITY_MINUTES
-                target_date = ord_map.get(date_ord + day_offset)
-                if target_date is None or slot_idx not in bucket_sets[target_date]:
-                    missing_slots += 1
-                    if missing_slots > max_missing_slots:
-                        break
-            if missing_slots > max_missing_slots:
-                continue
-            end_dt = date_base + timedelta(minutes=(start_idx + covered_slots) * RANGE_GRANULARITY_MINUTES)
-            cross_day = end_dt.date() != date_base.date()
-            available.append({
-                "index": start_idx,
-                "start": f"{start_idx * RANGE_GRANULARITY_MINUTES // 60:02d}:{start_idx * RANGE_GRANULARITY_MINUTES % 60:02d}",
-                "end": end_dt.strftime("%Y-%m-%d %H:%M") if cross_day else end_dt.strftime("%H:%M"),
-                "cross_day": cross_day,
-            })
-        if available:
-            result["dates"].append({
-                "date": date_base.strftime("%Y-%m-%d"),
-                "date_str": date_str,
-                "buckets": buckets,
-                "available_starts": available,
-            })
-
-    result["dates"].sort(key=lambda d: d["date_str"], reverse=True)
-    return result
-
 @app.get("/api/status")
 async def get_status():
     status_copy = dict(SYNTH_STATUS)
     qsize = SYNTH_QUEUE.qsize()
     if status_copy["is_running"] and qsize > 0:
         status_copy["message"] += f" (排队等待中: {qsize} 项)"
-        
+
     stats_out = dict(GLOBAL_STATS)
-    # 核心新增：向前端吐出后端进程绝对的运行秒数
+    # 向前端吐出后端进程绝对的运行秒数
     stats_out["uptime"] = int(time.time() - SERVER_START_TIME)
-    
+
     return {
         "stats": stats_out,
         "synth": status_copy,
@@ -458,14 +438,20 @@ async def get_ranges(display_name: str, hours: int):
     img_type = reverse_map.get(display_name)
     if not img_type:
         return {"code": 400, "granularity_minutes": RANGE_GRANULARITY_MINUTES, "dates": [], "message": "无效的气象图类型"}
-    if hours not in (1, 3, 6, 12, 24):
+    if hours not in SUPPORTED_HOURS:
         return {"code": 400, "granularity_minutes": RANGE_GRANULARITY_MINUTES, "dates": [], "message": "不支持的合成跨度"}
     now_ts = time.time()
     cache_key = (img_type, hours)
     cached = _ranges_cache.get(cache_key)
     if cached and cached[0] > now_ts:
         return {"code": 200, "granularity_minutes": cached[1]["granularity_minutes"], "dates": cached[1]["dates"]}
-    data = await asyncio.to_thread(compute_available_ranges, img_type, hours)
+    data = await asyncio.to_thread(
+        compute_available_ranges,
+        img_type,
+        hours,
+        DATA_DIR / img_type,
+        datetime.now(TZ_UTC8),
+    )
     _ranges_cache[cache_key] = (now_ts + RANGES_CACHE_TTL, data)
     return {"code": 200, "granularity_minutes": data["granularity_minutes"], "dates": data["dates"]}
 
@@ -474,44 +460,10 @@ async def get_logs():
     return {"logs": list(LOG_BUFFER)}
 
 
-def _scan_videos() -> list:
-    """扫描 data/output（含 cron 子目录）的 MP4，按文件名起始日期分组（同步函数，供 to_thread）"""
-    output_dir = DATA_DIR / "output"
-    items = []
-    if output_dir.exists():
-        for mp4 in output_dir.rglob("*.mp4"):
-            try:
-                st = mp4.stat()
-            except Exception:
-                continue
-            rel = mp4.relative_to(output_dir).as_posix()
-            parts = mp4.name.split("_")
-            # 优先取结束日期：跨日产物（类型_起始日期_起始时间_to_结束日期_结束时间.mp4）
-            # 按结束日期分组，符合"合成/结束当天"直觉；同日或旧格式退回起始日期，最后回退 mtime
-            end_date = parts[4] if len(parts) >= 5 and len(parts[4]) == 8 and parts[4].isdigit() else None
-            start_date = parts[1] if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit() else None
-            group_date = end_date or start_date or datetime.fromtimestamp(st.st_mtime, TZ_UTC8).strftime("%Y%m%d")
-            items.append({
-                "name": mp4.name,
-                "url": f"/videos/{rel}",
-                "size": st.st_size,
-                "mtime": datetime.fromtimestamp(st.st_mtime, TZ_UTC8).strftime("%Y-%m-%d %H:%M"),
-                "cron": rel.startswith("cron/"),
-                "date": group_date,
-            })
-    items.sort(key=lambda x: (x["date"], x["mtime"]), reverse=True)
-    groups = []
-    for item in items:
-        if not groups or groups[-1]["date"] != item["date"]:
-            groups.append({"date": item["date"], "videos": []})
-        groups[-1]["videos"].append(item)
-    return groups
-
-
 @app.get("/api/videos")
 async def get_videos():
     """视频产物列表：文件数量少，扫描开销低，不做缓存以保证合成后刷新即最新"""
-    groups = await asyncio.to_thread(_scan_videos)
+    groups = await asyncio.to_thread(scan_videos, DATA_DIR / "output")
     return {"code": 200, "groups": groups}
 
 
@@ -521,7 +473,11 @@ async def serve_video(path: str):
     output_dir = DATA_DIR / "output"
     base = str(output_dir.resolve())
     target = str((output_dir / path).resolve())
-    if os.path.commonpath([base, target]) != base:
+    try:
+        inside = os.path.commonpath([base, target]) == base
+    except ValueError:
+        inside = False
+    if not inside:
         return HTMLResponse("Forbidden", status_code=403)
     if not os.path.isfile(target):
         return HTMLResponse("Not Found", status_code=404)
@@ -532,14 +488,16 @@ async def trigger_synthesize(req: SynthRequest):
     img_type = reverse_map.get(req.display_name)
     if not img_type:
         return {"code": 400, "message": "无效的气象图类型"}
+    if req.hours not in SUPPORTED_HOURS:
+        return {"code": 400, "message": "不支持的合成跨度，仅支持 1/3/6/12/24 小时"}
     start_time = None
     if req.start_time:
         try:
             start_time = parse_start_time(req.start_time)
         except ValueError:
             return {"code": 400, "message": "start_time 格式应为 YYYYMMDD_HHMM"}
-        if req.hours <= 0:
-            return {"code": 400, "message": "指定起点时必须同时给出正数小时跨度"}
+        if start_time > datetime.now(TZ_UTC8):
+            return {"code": 400, "message": "起始时刻不能晚于当前时间"}
     await SYNTH_QUEUE.put({
         "img_type": img_type,
         "display_name": req.display_name,
@@ -559,13 +517,14 @@ async def serve_dashboard():
     return HTML_TEMPLATE
 
 if __name__ == "__main__":
+    configure_logging()
     local_ip = get_local_ip()
     print("\n" + "="*65)
     print("天气追踪边缘节点已启动！")
     print(f"控制面板 (局域网访问): http://{local_ip}:11451")
-    print(f"控制面板 (本机访问):   http://127.0.0.1:11451")
+    print("控制面板 (本机访问):   http://127.0.0.1:11451")
     print("="*65 + "\n")
-    
+
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 

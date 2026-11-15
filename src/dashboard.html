@@ -452,6 +452,8 @@
     let rangesData = { dates: [] };
     let dateIdx = 0;
     let selected = null;  // { date_str, index }
+    let videosSignature = "";
+    let rangesMessage = "";
 
     function fmtUptime(sec) {
         const d = Math.floor(sec / 86400);
@@ -500,11 +502,18 @@
         try {
             const res = await fetch(`/api/ranges?display_name=${encodeURIComponent(name)}&hours=${currentHours}`);
             const data = await res.json();
-            rangesData = data;
+            if (data.code && data.code !== 200) {
+                rangesData = { dates: [] };
+                rangesMessage = data.message || "加载可用时间段失败";
+            } else {
+                rangesData = data;
+                rangesMessage = "";
+            }
             dateIdx = 0;
             selected = null;
         } catch (e) {
             rangesData = { dates: [] };
+            rangesMessage = "与节点通信失败，请稍后重试";
         }
         renderTimeline();
     }
@@ -518,7 +527,7 @@
         tl.innerHTML = "";
         const dates = rangesData.dates || [];
         if (dates.length === 0) {
-            dateLabel.textContent = "暂无可用日期";
+            dateLabel.textContent = rangesMessage || "暂无可用日期";
             prev.disabled = true;
             next.disabled = true;
             clear.hidden = true;
@@ -597,15 +606,29 @@
         const btn = document.getElementById("goBtn");
         btn.disabled = true;
         try {
-            await fetch("/api/synthesize", {
+            const res = await fetch("/api/synthesize", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
             });
+            const data = await res.json();
+            if (data.code !== 200) {
+                showSynthMessage(data.message || "任务提交失败", true);
+            } else {
+                showSynthMessage(data.message || "任务已加入队列", false);
+            }
+        } catch (e) {
+            showSynthMessage("与节点通信失败，请检查服务是否运行", true);
         } finally {
             btn.disabled = false;
             pollStatus();
         }
+    }
+
+    function showSynthMessage(message, isError) {
+        const box = document.getElementById("statusAlert");
+        document.getElementById("statusText").textContent = message;
+        box.className = "status-box " + (isError ? "err" : "ok");
     }
 
     function renderDownloads(downloads) {
@@ -679,7 +702,9 @@
         arr.forEach((n, i) => {
             const cell = document.createElement("i");
             if (n > 0) cell.classList.add("hit");
-            cell.title = `${String((new Date().getHours() - 23 + i + 48) % 24).padStart(2, "0")}时 ${n} 帧`;
+            // 后端 hourly[0] 是最近 1 小时，hourly[23] 是 23 小时前
+            const hour = (new Date().getHours() - i + 24) % 24;
+            cell.title = `${String(hour).padStart(2, "0")}时 ${n} 帧`;
             cov.appendChild(cell);
         });
         return cov;
@@ -771,8 +796,18 @@
 
     async function loadVideos() {
         try {
+            // 用户正在播放时不要重建列表，否则每 60 秒会把播放器移除
+            if (document.querySelector(".vplayer:not([hidden])")) {
+                videosSignature = "";
+                return;
+            }
             const res = await fetch("/api/videos");
             const data = await res.json();
+            const signature = JSON.stringify(
+                (data.groups || []).map(g => [g.date, g.videos.map(v => [v.name, v.mtime, v.size])])
+            );
+            if (signature === videosSignature) return;
+            videosSignature = signature;
             const box = document.getElementById("videoList");
             box.innerHTML = "";
             if (!data.groups || data.groups.length === 0) {

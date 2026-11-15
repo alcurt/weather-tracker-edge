@@ -1,28 +1,63 @@
 import asyncio
+import email.utils
 import hashlib
 import io
 import json
 import logging
 import os
 import time
-import email.utils
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import aiofiles
 import httpx
 from PIL import Image
 
 from config import (
-    DATA_DIR, TARGET_URLS, RADAR_TYPES, RADAR_URL_TEMPLATE,
-    POLL_INTERVAL, MAX_RETRIES, BASE_TIMEOUT, TZ_UTC8,
-    NMC_SATELLITE_TYPES, NMC_BACKFILL_DAYS, NMC_POLL_WINDOW_HOURS,
-    NMC_BACKFILL_BATCH_SIZE, NMC_BACKFILL_CONCURRENCY, NMC_BATCH_PAUSE_SECONDS,
-    CONNECTION_RECYCLE_SECONDS, HTTP_USER_AGENT,
+    BASE_TIMEOUT,
+    CONNECTION_RECYCLE_SECONDS,
+    DATA_DIR,
+    HTTP_USER_AGENT,
+    MAX_RETRIES,
+    NMC_BACKFILL_BATCH_SIZE,
+    NMC_BACKFILL_CONCURRENCY,
+    NMC_BACKFILL_DAYS,
+    NMC_BATCH_PAUSE_SECONDS,
+    NMC_POLL_WINDOW_HOURS,
+    NMC_SATELLITE_TYPES,
+    POLL_INTERVAL,
+    RADAR_TYPES,
+    RADAR_URL_TEMPLATE,
+    TARGET_URLS,
+    TZ_UTC8,
 )
 from download_stats import download_stats
+from fetch import is_retryable_status, retry_delay
+from storage import atomic_write_bytes_async
 
 logger = logging.getLogger(__name__)
+
+
+def build_radar_url(radar_type: str, target_time: datetime) -> str:
+    """雷达图 URL：路径日期与文件名均使用北京时间的观测时次。"""
+    return RADAR_URL_TEMPLATE.format(
+        date_str=target_time.strftime("%Y%m%d"),
+        upstream_time_str=target_time.strftime("%Y%m%d%H%M00"),
+        suffix=RADAR_TYPES[radar_type],
+    )
+
+
+def build_nmc_url(img_type: str, target_time: datetime) -> str:
+    """由北京时观测时刻构造中央台卫星云图 URL。
+
+    中央台文件名时间戳与 URL 日期路径均为 UTC（页面展示的北京时间 = UTC + 8h），
+    因此必须先把北京时时刻转换为 UTC 再填入模板。
+    """
+    cfg = NMC_SATELLITE_TYPES[img_type]
+    utc_time = target_time.astimezone(timezone.utc)
+    return cfg["url_template"].format(
+        date_path=utc_time.strftime("%Y/%m/%d"),
+        timestamp=utc_time.strftime("%Y%m%d%H%M%S"),
+    )
 
 class CursorManager:
     """管理本地状态游标，结合异步锁确立文件系统为单一数据源"""
@@ -68,13 +103,16 @@ class AsyncPoller:
         self.cursors = {img_type: CursorManager(img_type) for img_type in self.all_types}
         self._client_created_at = time.time()
         self.client = self._new_client()
-        
+        self._tasks: list[asyncio.Task] = []
+        self._retire_tasks: set[asyncio.Task] = set()
+        self._stop_event = asyncio.Event()
+
         # 核心新增：轻量化共享指标矩阵，为无头节点维护观测链路
         self.metrics = {
-            img_type: {"elapsed": 0.0, "status": "INIT", "updated_at": 0.0} 
+            img_type: {"elapsed": 0.0, "status": "INIT", "updated_at": 0.0}
             for img_type in self.all_types
         }
-        
+
         for radar_type in RADAR_TYPES:
             (DATA_DIR / radar_type).mkdir(parents=True, exist_ok=True)
 
@@ -83,19 +121,47 @@ class AsyncPoller:
             http2=True,
             timeout=BASE_TIMEOUT,
             headers={"User-Agent": HTTP_USER_AGENT},
+            # 守护进程不应继承桌面环境的代理设置（含格式异常时 httpx 会直接构造失败）
+            trust_env=False,
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=8,
+                keepalive_expiry=30.0,
+            ),
         )
 
     async def _ensure_client(self):
-        """定期重建连接池：规避长驻连接被防火墙/网关静默掐断后卡死的风险"""
+        """定期重建连接池：规避长驻连接被防火墙/网关静默掐断后卡死的风险。
+
+        旧连接池延迟 60 秒关闭，避免关闭瞬间掐断其它信源的在途请求。
+        """
         if time.time() - self._client_created_at < CONNECTION_RECYCLE_SECONDS:
             return
         old_client = self.client
         self.client = self._new_client()
         self._client_created_at = time.time()
-        try:
-            await old_client.aclose()
-        except Exception:
-            logger.warning("旧连接池关闭时发生异常，已忽略（新连接池已就绪）。")
+        self._retire_client(old_client)
+
+    def _retire_client(self, old_client: httpx.AsyncClient) -> None:
+        async def closer() -> None:
+            try:
+                await asyncio.sleep(60)
+            finally:
+                try:
+                    await old_client.aclose()
+                except Exception:
+                    logger.warning("旧连接池关闭时发生异常，已忽略。")
+
+        task = asyncio.create_task(closer())
+        self._retire_tasks.add(task)
+        task.add_done_callback(self._retire_tasks.discard)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"信源后台任务异常退出: {exc!r}")
 
     def _record_download_results(
         self,
@@ -121,7 +187,7 @@ class AsyncPoller:
                 if count_fail:
                     download_stats.record("fail")
 
-    async def _fetch_single_radar(self, radar_type: str, suffix: str, target_time: datetime) -> str:
+    async def _fetch_single_radar(self, radar_type: str, target_time: datetime) -> str:
         """抓取单个时刻雷达图：内置坏图免疫与断点续传校验"""
         date_str = target_time.strftime("%Y%m%d")
         upstream_time_str = target_time.strftime("%Y%m%d%H%M00")
@@ -142,43 +208,54 @@ class AsyncPoller:
             except Exception:
                 return "ERROR"
             
-        url = RADAR_URL_TEMPLATE.format(date_str=date_str, upstream_time_str=upstream_time_str, suffix=suffix)
-        
+        url = build_radar_url(radar_type, target_time)
+
         attempt = 0
         while attempt <= MAX_RETRIES:
             try:
                 async with self.client.stream("GET", url) as response:
                     if response.status_code == 404:
                         return "404"
+                    if is_retryable_status(response.status_code):
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {response.status_code}", request=response.request, response=response
+                        )
                     response.raise_for_status()
                     content = await response.aread()
-                    
+
                     try:
                         img = Image.open(io.BytesIO(content))
                         img.verify()
                     except Exception as e:
                         logger.warning(f"[{radar_type}] 图像尾块损坏，重试: {e}")
-                        raise ValueError("Radar verification failed")
-                        
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(file_path, "wb") as f:
-                        await f.write(content)
-                    
+                        raise ValueError("Radar verification failed") from e
+
+                    await atomic_write_bytes_async(file_path, content)
+
                     await self.cursors[radar_type].update("", "", "", str(file_path))
                     logger.info(f"[{radar_type}] 新雷达图成功落盘: {file_name}")
                     return "200"
+            except httpx.HTTPStatusError as e:
+                if not is_retryable_status(e.response.status_code):
+                    logger.error(f"[{radar_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次 {upstream_time_str}")
+                    return "ERROR"
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
+                    return "FETCH_ERR"
+                await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
             except (httpx.RequestError, ValueError):
                 attempt += 1
                 if attempt > MAX_RETRIES:
                     logger.error(f"[{radar_type}] 达到最大重试次数，放弃时次 {upstream_time_str}")
                     return "FETCH_ERR"
-                await asyncio.sleep(min(60, 5 * attempt))
+                await asyncio.sleep(retry_delay(attempt))
             except Exception as e:
                 logger.exception(f"[{radar_type}] 发生未预期的致命异常: {e}")
                 return "CRASH"
         return "TIMEOUT"
 
-    async def _loop_radar_source(self, radar_type: str, suffix: str):
+    async def _loop_radar_source(self, radar_type: str):
         """雷达图专属独立协程：彻底消除多路会话线头阻塞"""
         logger.info(f"[{radar_type}] 独立滑动窗口监听线程启动...")
         while True:
@@ -196,7 +273,7 @@ class AsyncPoller:
                 for i in range(11):
                     target_time = base_time - timedelta(minutes=6 * i)
                     target_times.append(target_time)
-                    tasks.append(self._fetch_single_radar(radar_type, suffix, target_time))
+                    tasks.append(self._fetch_single_radar(radar_type, target_time))
                 
                 results = await asyncio.gather(*tasks)
                 self._record_download_results(
@@ -205,7 +282,7 @@ class AsyncPoller:
                 )
                 if "200" in results:
                     status_summary = "200"
-                elif "FETCH_ERR" in results or "CRASH" in results:
+                elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
                     status_summary = "ERROR"
             except Exception as e:
                 logger.error(f"[{radar_type}] 轮询异常 (隔离不扩散): {e}")
@@ -221,21 +298,8 @@ class AsyncPoller:
             await download_stats.flush()
             await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
 
-    def _build_nmc_url(self, img_type: str, target_time: datetime) -> str:
-        """由北京时观测时刻构造中央台卫星云图 URL。
-
-        中央台文件名时间戳与 URL 日期路径均为 UTC（页面展示的北京时间 = UTC + 8h），
-        因此必须先把北京时时刻转换为 UTC 再填入模板。
-        """
-        cfg = NMC_SATELLITE_TYPES[img_type]
-        utc_time = target_time.astimezone(timezone.utc)
-        date_path = utc_time.strftime("%Y/%m/%d")
-        timestamp = utc_time.strftime("%Y%m%d%H%M%S")
-        return cfg["url_template"].format(date_path=date_path, timestamp=timestamp)
-
     async def _fetch_single_nmc(self, img_type: str, target_time: datetime) -> str:
         """抓取单个时次中央台卫星云图：本地去重 + 404 容忍 + 坏图重抓"""
-        cfg = NMC_SATELLITE_TYPES[img_type]
         file_name = f"{target_time.strftime('%Y%m%d_%H%M%S')}_{img_type}.png"
         save_dir = DATA_DIR / img_type / target_time.strftime("%Y%m%d")
         file_path = save_dir / file_name
@@ -251,7 +315,7 @@ class AsyncPoller:
             except Exception:
                 return "ERROR"
 
-        url = self._build_nmc_url(img_type, target_time)
+        url = build_nmc_url(img_type, target_time)
         attempt = 0
         while attempt <= MAX_RETRIES:
             try:
@@ -259,6 +323,10 @@ class AsyncPoller:
                     if response.status_code == 404:
                         # 上游该时次不存在（缺帧/未来时次），静默跳过避免日志刷屏
                         return "404"
+                    if is_retryable_status(response.status_code):
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {response.status_code}", request=response.request, response=response
+                        )
                     response.raise_for_status()
                     content = await response.aread()
 
@@ -267,21 +335,28 @@ class AsyncPoller:
                         img.verify()
                     except Exception as e:
                         logger.warning(f"[{img_type}] 图像尾块损坏，重试: {e}")
-                        raise ValueError("NMC satellite image verification failed")
+                        raise ValueError("NMC satellite image verification failed") from e
 
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(file_path, "wb") as f:
-                        await f.write(content)
+                    await atomic_write_bytes_async(file_path, content)
 
                     await self.cursors[img_type].update("", "", "", str(file_path))
                     logger.info(f"[{img_type}] 新卫星云图成功落盘: {file_name}")
                     return "200"
+            except httpx.HTTPStatusError as e:
+                if not is_retryable_status(e.response.status_code):
+                    logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}，放弃时次")
+                    return "ERROR"
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
+                    return "FETCH_ERR"
+                await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
             except (httpx.RequestError, ValueError):
                 attempt += 1
                 if attempt > MAX_RETRIES:
                     logger.error(f"[{img_type}] 达到最大重试次数，放弃时次 {target_time.strftime('%Y%m%d%H%M%S')}")
                     return "FETCH_ERR"
-                await asyncio.sleep(min(60, 5 * attempt))
+                await asyncio.sleep(retry_delay(attempt))
             except Exception as e:
                 logger.exception(f"[{img_type}] 发生未预期的致命异常: {e}")
                 return "CRASH"
@@ -359,7 +434,7 @@ class AsyncPoller:
                 )
                 if "200" in results:
                     status_summary = "200"
-                elif "FETCH_ERR" in results or "CRASH" in results:
+                elif any(r in ("FETCH_ERR", "CRASH", "ERROR") for r in results):
                     status_summary = "ERROR"
             except Exception as e:
                 logger.error(f"[{img_type}] 轮询异常 (隔离不扩散): {e}")
@@ -399,26 +474,30 @@ class AsyncPoller:
                             status_code = str(response.status_code)
                             if response.status_code == 304:
                                 break
+                            if is_retryable_status(response.status_code):
+                                raise httpx.HTTPStatusError(
+                                    f"HTTP {response.status_code}", request=response.request, response=response
+                                )
 
                             response.raise_for_status()
                             server_last_modified = response.headers.get("Last-Modified")
                             server_content_length = response.headers.get("Content-Length")
 
-                            if (server_last_modified == cursor_data["last_modified"] and 
+                            if (server_last_modified == cursor_data["last_modified"] and
                                 server_content_length == cursor_data["content_length"]):
                                 status_code = "304"
                                 break
-                            
+
                             logger.info(f"[{img_type}] 探测到新响应头，开始下载实体流...")
                             content = await response.aread()
-                            
+
                             try:
                                 img = Image.open(io.BytesIO(content))
                                 img.verify()
                             except Exception as e:
                                 logger.warning(f"[{img_type}] 图像尾块损坏(上游竞态写入): {e}")
-                                raise ValueError("Image IEND validation failed.")
-                            
+                                raise ValueError("Image IEND validation failed.") from e
+
                             file_hash = hashlib.sha256(content).hexdigest()
                             if file_hash == cursor_data.get("hash"):
                                 await cursor_mgr.update(server_last_modified, server_content_length, file_hash, cursor_data.get("file_path", ""))
@@ -436,28 +515,34 @@ class AsyncPoller:
 
                             date_str = true_time.strftime("%Y%m%d")
                             time_str = true_time.strftime("%Y%m%d_%H%M%S")
-                            
-                            save_dir = cursor_mgr.type_dir / date_str
-                            save_dir.mkdir(parents=True, exist_ok=True)
-                            
-                            file_name = f"{time_str}_{img_type}.png"
-                            file_path = save_dir / file_name
 
-                            async with aiofiles.open(file_path, "wb") as f:
-                                await f.write(content)
-                                
+                            file_name = f"{time_str}_{img_type}.png"
+                            file_path = cursor_mgr.type_dir / date_str / file_name
+
+                            await atomic_write_bytes_async(file_path, content)
+
                             logger.info(f"[{img_type}] 新气象图成功落盘: {file_name}")
                             await cursor_mgr.update(server_last_modified, server_content_length, file_hash, str(file_path))
                             status_code = "200"
                             break
+                    except httpx.HTTPStatusError as e:
+                        if not is_retryable_status(e.response.status_code):
+                            logger.error(f"[{img_type}] 上游返回不可重试状态 {e.response.status_code}")
+                            status_code = "ERROR"
+                            break
+                        attempt += 1
+                        status_code = "ERROR"
+                        if attempt > MAX_RETRIES:
+                            logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
+                            break
+                        await asyncio.sleep(retry_delay(attempt, e.response.headers.get("Retry-After")))
                     except (httpx.RequestError, ValueError):
                         attempt += 1
                         status_code = "ERROR"
                         if attempt > MAX_RETRIES:
                             logger.error(f"[{img_type}] 达到最大重试次数，放弃当前轮次。")
                             break
-                        backoff = min(300, 10 * (2 ** (attempt - 1)))
-                        await asyncio.sleep(backoff)
+                        await asyncio.sleep(retry_delay(attempt))
             except Exception as e:
                 logger.error(f"[{img_type}] 致命异常: {e}")
                 status_code = "CRASH"
@@ -502,20 +587,42 @@ class AsyncPoller:
     async def run_forever(self):
         """派生全部信源的并发永动机链路与 1 条独立性能监控哨兵"""
         logger.info(f"系统解耦并发总线正在为 {len(self.all_types)} 个独立信源分配永久物理线程...")
-        
+
         for img_type, url in TARGET_URLS.items():
-            asyncio.create_task(self._loop_single_source(img_type, url))
-        for r_type, suffix in RADAR_TYPES.items():
-            asyncio.create_task(self._loop_radar_source(r_type, suffix))
+            self._add_task(self._loop_single_source(img_type, url))
+        for r_type in RADAR_TYPES:
+            self._add_task(self._loop_radar_source(r_type))
         for img_type in NMC_SATELLITE_TYPES:
-            asyncio.create_task(self._loop_nmc_source(img_type))
-            
+            self._add_task(self._loop_nmc_source(img_type))
+
         # 激活全局脉搏监测哨兵
-        asyncio.create_task(self._monitor_loop())
-        
-        while True:
-            await asyncio.sleep(3600)
+        self._add_task(self._monitor_loop())
+
+        await self._stop_event.wait()
+
+    def _add_task(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(self._on_task_done)
+        self._tasks.append(task)
+        return task
 
     async def shutdown(self):
-        await self.client.aclose()
+        """停止全部信源子任务、回收连接池并落盘统计。"""
+        self._stop_event.set()
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        retirees = list(self._retire_tasks)
+        for task in retirees:
+            task.cancel()
+        if retirees:
+            await asyncio.gather(*retirees, return_exceptions=True)
+
+        try:
+            await self.client.aclose()
+        except Exception:
+            logger.warning("关闭当前连接池时发生异常，已忽略。")
         await download_stats.flush()

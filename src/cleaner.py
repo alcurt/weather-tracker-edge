@@ -1,9 +1,9 @@
 import logging
 import shutil
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from config import DATA_DIR, TZ_UTC8
+from storage import cleanup_part_files
 
 logger = logging.getLogger(__name__)
 
@@ -62,4 +62,9 @@ class StorageCleaner:
                     except Exception:
                         pass
                         
+        # 4. 清理崩溃遗留的写入残片（*.part），避免占用空间与误导人工排查
+        removed = cleanup_part_files(DATA_DIR, older_than_seconds=3600)
+        if removed:
+            logger.info(f"[GC] 已清理 {removed} 个写入残片 (.part)")
+
         logger.info("GC 清理任务执行完毕。")

@@ -17,6 +17,17 @@
 
 `data/`、`logs/` 由程序首次运行自动创建，无需手动准备。
 
+## 开发与测试
+
+```powershell
+uv sync                     # 含 pytest / ruff 开发依赖
+uv run ruff check .         # 静态检查
+uv run pytest               # 单元测试；本机有 ffmpeg.exe 时会额外跑一次合成集成测试
+```
+
+测试不访问网络，也不需要真实的 `data/` 数据；CI 在 Windows runner 上执行同样的命令。
+
+
 ## 运维速查
 
 - 每日 00:15 自动合成昨日全天 7 个信源 24h 跨度视频 → `data/output/cron/`

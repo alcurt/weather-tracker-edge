@@ -95,7 +95,7 @@ class DownloadStats:
             return
         self._prune()
         try:
-            STATS_DIR.mkdir(parents=True, exist_ok=True)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             payload = {
                 "updated_at": datetime.now(TZ_UTC8).isoformat(),
