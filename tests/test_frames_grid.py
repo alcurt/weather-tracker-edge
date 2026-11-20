@@ -23,6 +23,9 @@ def test_frame_catalog_ignores_part_files_and_caches(tmp_path):
     date_dir.mkdir(parents=True)
     (date_dir / "20260101_120000_TempC.png").write_bytes(b"x")
     (date_dir / "20260101_121000_TempC.png.part").write_bytes(b"partial")
+    hko_dir = tmp_path / "HKORadar" / "20260101"
+    hko_dir.mkdir(parents=True)
+    (hko_dir / "20260101_122000_HKORadar.jpg").write_bytes(b"x")
 
     catalog = FrameCatalog(tmp_path)
     first = catalog.timestamps("TempC", "20260101")
@@ -35,6 +38,7 @@ def test_frame_catalog_ignores_part_files_and_caches(tmp_path):
     second = catalog.timestamps("TempC", "20260101")
     assert len(second) == 2
     assert catalog.timestamps("TempC", "20260102") == ()
+    assert catalog.timestamps("HKORadar", "20260101") == (datetime(2026, 1, 1, 12, 20, tzinfo=TZ_UTC8),)
 
 
 def test_grid_slot_paths_and_keys():
@@ -44,6 +48,10 @@ def test_grid_slot_paths_and_keys():
     path = slot.path(Path("root"))
     assert path == Path("root") / "RadarGZ" / "20260102" / "20260102_050600_RadarGZ.png"
     assert grid_slot_key("RadarGZ", slot.ts) == slot.key
+
+    jpg_slot = GridSlot("HKORadar", slot.ts, ".jpg")
+    assert jpg_slot.file_name == "20260102_050600_HKORadar.jpg"
+    assert jpg_slot.path(Path("root")).name == "20260102_050600_HKORadar.jpg"
 
 
 def test_grid_slots_newest_first():

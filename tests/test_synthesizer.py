@@ -32,6 +32,7 @@ def test_collect_frames_filters_window_and_sorts(tmp_path):
         "20260101_110000_TempC.png": datetime(2026, 1, 1, 11, 0, tzinfo=TZ_UTC8),
         "20260101_120000_TempC.png": datetime(2026, 1, 1, 12, 0, tzinfo=TZ_UTC8),
         "20260101_130000_TempC.png": datetime(2026, 1, 1, 13, 0, tzinfo=TZ_UTC8),
+        "20260101_121500_HKORadar.jpg": datetime(2026, 1, 1, 12, 15, tzinfo=TZ_UTC8),
         "notes.txt": datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8),
     }
     for name, ts in frames.items():
@@ -46,4 +47,7 @@ def test_collect_frames_filters_window_and_sorts(tmp_path):
     start = datetime(2026, 1, 1, 11, 30, tzinfo=TZ_UTC8)
     end = datetime(2026, 1, 1, 12, 30, tzinfo=TZ_UTC8)
     collected = synth._collect_frames(type_dir, start, end)
-    assert [ts for _, ts in collected] == [datetime(2026, 1, 1, 12, 0, tzinfo=TZ_UTC8)]
+    assert [ts for _, ts in collected] == [
+        datetime(2026, 1, 1, 12, 0, tzinfo=TZ_UTC8),
+        datetime(2026, 1, 1, 12, 15, tzinfo=TZ_UTC8),
+    ]

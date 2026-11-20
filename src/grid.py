@@ -1,7 +1,7 @@
 """时间网格信源的通用落盘与抓取逻辑（雷达 / FY4C 共用）。
 
 网格信源都满足同一套约束：
-- 文件名 = ``{观测时刻}_{信源}.png``；
+- 文件名 = ``{观测时刻}_{信源}.png`` 或 ``.jpg``；
 - 时次在发布前必然 404，因此有成熟期与负缓存；
 - 内容需通过 Pillow 完整性校验，并以原子写落盘。
 
@@ -35,6 +35,7 @@ MIN_HEALTHY_BYTES = 100
 class GridSlot:
     source: str
     ts: datetime
+    file_ext: str = ".png"
 
     @property
     def key(self) -> str:
@@ -42,7 +43,7 @@ class GridSlot:
 
     @property
     def file_name(self) -> str:
-        return f"{self.ts.strftime('%Y%m%d_%H%M%S')}_{self.source}.png"
+        return f"{self.ts.strftime('%Y%m%d_%H%M%S')}_{self.source}{self.file_ext}"
 
     def path(self, data_dir: Path) -> Path:
         return data_dir / self.source / self.ts.strftime("%Y%m%d") / self.file_name
@@ -79,12 +80,14 @@ async def fetch_grid_slot(
     data_dir: Path,
     cursor: Any = None,
     max_retries: int = MAX_RETRIES,
+    file_ext: str = ".png",
 ) -> str:
     """抓取单个网格时次：本地去重 + 404 容忍 + 坏图重抓 + 原子落盘。
 
     返回与旧实现一致的字符串结果码：200 / EXIST / 404 / ERROR / FETCH_ERR / CRASH / TIMEOUT。
+    ``file_ext`` 决定落盘扩展名；HKO 使用 ``.jpg``，其余默认 ``.png``。
     """
-    slot = GridSlot(source, target_time)
+    slot = GridSlot(source, target_time, file_ext)
     file_path = slot.path(data_dir)
 
     if file_path.exists():

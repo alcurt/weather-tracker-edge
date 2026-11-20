@@ -16,6 +16,8 @@ from config import (
     BASE_TIMEOUT,
     CONNECTION_RECYCLE_SECONDS,
     DATA_DIR,
+    HKO_RADAR,
+    HKO_RADAR_KEY,
     HTTP_USER_AGENT,
     MAX_RETRIES,
     NMC_BACKFILL_BATCH_SIZE,
@@ -58,6 +60,40 @@ def build_radar_url(radar_type: str, target_time: datetime) -> str:
         upstream_time_str=target_time.strftime("%Y%m%d%H%M00"),
         suffix=RADAR_TYPES[radar_type],
     )
+
+
+def build_hko_radar_url(target_time: datetime) -> str:
+    """HKO 雷达 URL：文件名时间戳为 HKT（UTC+8）。"""
+    return HKO_RADAR["url_template"].format(timestamp=target_time.strftime("%Y%m%d%H%M"))
+
+
+RADAR_SOURCE_SPECS: dict[str, dict] = {
+    radar_type: {
+        "url_kind": "tqyb",
+        "suffix": suffix,
+        "file_ext": ".png",
+        "interval_minutes": RADAR_INTERVAL_MINUTES,
+        "poll_window_hours": RADAR_POLL_WINDOW_HOURS,
+        "backfill_hours": RADAR_BACKFILL_HOURS,
+        "backfill_interval_minutes": RADAR_BACKFILL_INTERVAL_MINUTES,
+        "fetch_concurrency": RADAR_FETCH_CONCURRENCY,
+        "pending_grace_minutes": RADAR_PENDING_GRACE_MINUTES,
+        "min_age_minutes": RADAR_MIN_AGE_MINUTES,
+    }
+    for radar_type, suffix in RADAR_TYPES.items()
+}
+RADAR_SOURCE_SPECS[HKO_RADAR_KEY] = {
+    "url_kind": "hko",
+    "url_template": HKO_RADAR["url_template"],
+    "file_ext": HKO_RADAR["file_ext"],
+    "interval_minutes": HKO_RADAR["interval_minutes"],
+    "poll_window_hours": HKO_RADAR["poll_window_hours"],
+    "backfill_hours": HKO_RADAR["backfill_hours"],
+    "backfill_interval_minutes": HKO_RADAR["backfill_interval_minutes"],
+    "fetch_concurrency": HKO_RADAR["fetch_concurrency"],
+    "pending_grace_minutes": HKO_RADAR["pending_grace_minutes"],
+    "min_age_minutes": HKO_RADAR["min_age_minutes"],
+}
 
 
 def build_nmc_url(img_type: str, target_time: datetime) -> str:
@@ -113,7 +149,7 @@ class AsyncPoller:
     """完全解耦的异步多路守护探测器 (集成全局脉搏监测)"""
     
     def __init__(self):
-        self.all_types = list(TARGET_URLS.keys()) + list(RADAR_TYPES.keys()) + list(NMC_SATELLITE_TYPES.keys())
+        self.all_types = list(TARGET_URLS.keys()) + list(RADAR_SOURCE_SPECS.keys()) + list(NMC_SATELLITE_TYPES.keys())
         self.cursors = {img_type: CursorManager(img_type) for img_type in self.all_types}
         self._client_created_at = time.time()
         self.client = self._new_client()
@@ -130,7 +166,7 @@ class AsyncPoller:
             for img_type in self.all_types
         }
 
-        for radar_type in RADAR_TYPES:
+        for radar_type in RADAR_SOURCE_SPECS:
             (DATA_DIR / radar_type).mkdir(parents=True, exist_ok=True)
 
     def _new_client(self) -> httpx.AsyncClient:
@@ -229,34 +265,42 @@ class AsyncPoller:
     async def _fetch_single_radar(
         self, radar_type: str, target_time: datetime, max_retries: int = MAX_RETRIES
     ) -> str:
-        """抓取单个时刻雷达图（通用网格抓取）。"""
+        """抓取单个时刻雷达图（通用网格抓取，支持 PNG/JPEG 上游）。"""
+        spec = RADAR_SOURCE_SPECS[radar_type]
+        if spec["url_kind"] == "hko":
+            url = build_hko_radar_url(target_time)
+        else:
+            url = build_radar_url(radar_type, target_time)
         return await fetch_grid_slot(
             self.client,
             source=radar_type,
             target_time=target_time,
-            url=build_radar_url(radar_type, target_time),
+            url=url,
             data_dir=DATA_DIR,
             cursor=self.cursors[radar_type],
             max_retries=max_retries,
+            file_ext=spec["file_ext"],
         )
 
     async def _backfill_radar_source(self, radar_type: str, now: datetime) -> None:
         """扫描最近数小时的雷达缺口，自愈超过常规窗口的断网。"""
-        slot_count = int(RADAR_BACKFILL_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
+        spec = RADAR_SOURCE_SPECS[radar_type]
+        interval = spec["interval_minutes"]
+        slot_count = int(spec["backfill_hours"] * 60 / interval) + 1
         base_time = now.replace(
-            minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
+            minute=(now.minute // interval) * interval,
             second=0,
             microsecond=0,
         )
         pairs = [
             (target_time, grid_slot_key(radar_type, target_time))
             for target_time in (
-                base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
+                base_time - timedelta(minutes=interval * i)
                 for i in range(slot_count)
             )
-            if slot_is_mature(now, target_time, RADAR_MIN_AGE_MINUTES)
+            if slot_is_mature(now, target_time, spec["min_age_minutes"])
         ]
-        semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
+        semaphore = asyncio.Semaphore(spec["fetch_concurrency"])
 
         async def fetch_one(target_time: datetime) -> str:
             async with semaphore:
@@ -307,35 +351,37 @@ class AsyncPoller:
     async def _radar_tick(self, radar_type: str) -> str:
         await self._ensure_client()
         now = datetime.now(TZ_UTC8)
+        spec = RADAR_SOURCE_SPECS[radar_type]
+        interval = spec["interval_minutes"]
 
-        # 启动即回补最近数小时缺口，之后每 30 分钟补漏一次
+        # 启动即回补最近数小时缺口，之后按配置周期补漏
         last_backfill = self._last_backfill.get(radar_type, 0.0)
-        if time.time() - last_backfill >= RADAR_BACKFILL_INTERVAL_MINUTES * 60:
+        if time.time() - last_backfill >= spec["backfill_interval_minutes"] * 60:
             await self._backfill_radar_source(radar_type, now)
             self._last_backfill[radar_type] = time.time()
 
         base_time = now.replace(
-            minute=(now.minute // RADAR_INTERVAL_MINUTES) * RADAR_INTERVAL_MINUTES,
+            minute=(now.minute // interval) * interval,
             second=0,
             microsecond=0,
         )
-        slot_count = int(RADAR_POLL_WINDOW_HOURS * 60 / RADAR_INTERVAL_MINUTES) + 1
+        slot_count = int(spec["poll_window_hours"] * 60 / interval) + 1
         pairs = [
             (target_time, grid_slot_key(radar_type, target_time))
             for target_time in (
-                base_time - timedelta(minutes=RADAR_INTERVAL_MINUTES * i)
+                base_time - timedelta(minutes=interval * i)
                 for i in range(slot_count)
             )
         ]
         self.probes.prune({key for _, key in pairs})
         pending = [
             (t, key) for t, key in pairs
-            if slot_is_mature(now, t, RADAR_MIN_AGE_MINUTES) and self.probes.should_probe(key)
+            if slot_is_mature(now, t, spec["min_age_minutes"]) and self.probes.should_probe(key)
         ]
 
         results = []
         if pending:
-            semaphore = asyncio.Semaphore(RADAR_FETCH_CONCURRENCY)
+            semaphore = asyncio.Semaphore(spec["fetch_concurrency"])
 
             async def fetch_one(target_time: datetime, sem: asyncio.Semaphore = semaphore) -> str:
                 async with sem:
@@ -345,7 +391,7 @@ class AsyncPoller:
             self._record_download_results(
                 radar_type, results,
                 item_keys=[key for _, key in pending],
-                pending_grace_minutes=RADAR_PENDING_GRACE_MINUTES,
+                pending_grace_minutes=spec["pending_grace_minutes"],
             )
             self._mark_probe_results(pending, results)
 
@@ -703,7 +749,7 @@ class AsyncPoller:
 
         for img_type, url in TARGET_URLS.items():
             self._add_task(self._loop_single_source(img_type, url))
-        for r_type in RADAR_TYPES:
+        for r_type in RADAR_SOURCE_SPECS:
             self._add_task(self._loop_radar_source(r_type))
         for img_type in NMC_SATELLITE_TYPES:
             self._add_task(self._loop_nmc_source(img_type))

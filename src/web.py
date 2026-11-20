@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from analytics import compute_available_ranges, scan_videos, summarize_24h
 from cleaner import StorageCleaner
-from config import DATA_DIR, TZ_UTC8
+from config import DATA_DIR, HKO_RADAR, HKO_RADAR_KEY, TZ_UTC8
 from download_stats import download_stats
 from frames import FrameCatalog
 from jobs import JobManager
@@ -47,6 +47,7 @@ display_groups = {
     "天气雷达回波": {
         "RadarGZ": "广州组合反射率",
         "RadarGD": "广东雷达拼图",
+        HKO_RADAR_KEY: HKO_RADAR["display_name"],
     },
     "风云4C卫星云图": {
         "FY4C": "风云4C云图",
@@ -56,8 +57,8 @@ flat_display_map = {k: v for group in display_groups.values() for k, v in group.
 reverse_map = {v: k for k, v in flat_display_map.items()}
 all_target_keys = list(flat_display_map.keys())
 
-# 每日 00:15 昨日总结排除的信源（四个 B 类分布图取消；FY4C 纳入定时任务）
-CRON_EXCLUDED_TYPES = {"TempB", "RainB", "Rain24hB", "WindB"}
+# 每日 00:15 昨日总结排除的信源（四个 B 类分布图取消；HKO 只有约 5 小时保留，不能做 24h 总结）
+CRON_EXCLUDED_TYPES = {"TempB", "RainB", "Rain24hB", "WindB", HKO_RADAR_KEY}
 SUPPORTED_HOURS = (1, 3, 6, 12, 24)
 FPS_BY_HOURS = {1: 4.0, 3: 6.0, 6: 8.0, 12: 9.6, 24: 14.4}
 
@@ -482,7 +483,10 @@ def build_app(state: AppState) -> FastAPI:
 
     @app.get("/api/options")
     async def get_options():
-        return {"groups": {group: list(types.values()) for group, types in display_groups.items()}}
+        return {
+            "groups": {group: list(types.values()) for group, types in display_groups.items()},
+            "max_hours": {HKO_RADAR["display_name"]: HKO_RADAR["max_synthesis_hours"]},
+        }
 
     @app.get("/api/ranges")
     async def get_ranges(display_name: str, hours: int):
@@ -547,6 +551,11 @@ def build_app(state: AppState) -> FastAPI:
         img_type = reverse_map.get(req.display_name)
         if not img_type:
             return {"code": 400, "message": "无效的气象图类型"}
+        if img_type == HKO_RADAR_KEY and req.hours > HKO_RADAR["max_synthesis_hours"]:
+            return {
+                "code": 400,
+                "message": f"香港天文台雷达仅保留约 5 小时，最高支持 {HKO_RADAR['max_synthesis_hours']} 小时跨度",
+            }
         if req.hours not in SUPPORTED_HOURS:
             return {"code": 400, "message": "不支持的合成跨度，仅支持 1/3/6/12/24 小时"}
         start_time = None

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config import DATA_DIR, ROOT_DIR, TZ_UTC8
+from config import DATA_DIR, FRAME_EXTENSIONS, ROOT_DIR, TZ_UTC8
 from frames import parse_frame_timestamp
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class Synthesizer:
             if date_dir.exists() and date_dir.is_dir():
                 with os.scandir(date_dir) as entries:
                     for entry in entries:
-                        if not entry.name.endswith(".png"):
+                        if not entry.name.endswith(FRAME_EXTENSIONS):
                             continue
                         ts = parse_frame_timestamp(entry.name)
                         if ts is not None and start_time <= ts <= end_time:
@@ -91,7 +91,7 @@ class Synthesizer:
                     latest = None
                     with os.scandir(target_date_dir) as entries:
                         for entry in entries:
-                            if not entry.name.endswith(".png"):
+                            if not entry.name.endswith(FRAME_EXTENSIONS):
                                 continue
                             ts = parse_frame_timestamp(entry.name)
                             if ts is not None and (latest is None or ts > latest):

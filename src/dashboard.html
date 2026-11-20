@@ -163,6 +163,8 @@
         transition: border-color 0.15s, color 0.15s, background 0.15s;
     }
     .span-btn:hover { border-color: var(--accent); color: var(--text); }
+    .span-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .span-btn:disabled:hover { border-color: var(--line); color: var(--muted); }
     .span-btn.active {
         border-color: var(--accent);
         color: var(--accent);
@@ -592,6 +594,7 @@
     let lastUptime = -1;
     let sseActive = false;
     let eventSource = null;
+    let maxHoursByName = {};
 
     function fmtUptime(sec) {
         const d = Math.floor(sec / 86400);
@@ -606,6 +609,7 @@
         const res = await fetch("/api/options");
         const data = await res.json();
         const select = document.getElementById("typeSelect");
+        maxHoursByName = data.max_hours || {};
         select.innerHTML = "";
         for (const [group, opts] of Object.entries(data.groups)) {
             const og = document.createElement("optgroup");
@@ -618,11 +622,36 @@
             });
             select.appendChild(og);
         }
-        select.addEventListener("change", loadRanges);
+        select.addEventListener("change", () => {
+            applySpanLimits();
+            loadRanges();
+        });
+        applySpanLimits();
         await loadRanges();
     }
 
+    function applySpanLimits() {
+        const name = document.getElementById("typeSelect").value;
+        const maxHours = maxHoursByName[name] || 24;
+        document.querySelectorAll(".span-btn").forEach(button => {
+            const hours = Number(button.dataset.hours);
+            button.disabled = hours > maxHours;
+            button.title = button.disabled
+                ? `${name} 仅保留约 5 小时，最高支持 ${maxHours} 小时`
+                : "";
+        });
+        if (currentHours > maxHours) {
+            currentHours = maxHours;
+            document.querySelectorAll(".span-btn").forEach(button => {
+                button.classList.toggle("active", Number(button.dataset.hours) === maxHours);
+            });
+        }
+    }
+
     function selectSpan(hours) {
+        const name = document.getElementById("typeSelect").value;
+        const maxHours = maxHoursByName[name] || 24;
+        hours = Math.min(hours, maxHours);
         currentHours = hours;
         selected = null;
         document.querySelectorAll(".span-btn").forEach(b => b.classList.toggle("active", Number(b.dataset.hours) === hours));

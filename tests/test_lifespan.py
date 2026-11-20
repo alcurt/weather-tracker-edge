@@ -30,9 +30,18 @@ def test_lifespan_cancels_daemons_and_shuts_poller_down(monkeypatch):
     state = web.AppState()
     app = web.build_app(state)
     with TestClient(app) as client:
+        options = client.get("/api/options").json()
+        assert options["max_hours"]["香港天文台雷达"] == 3
         assert client.get("/api/options").status_code == 200
         status = client.get("/api/status").json()
         assert "jobs" in status and "queue_size" in status
+
+        rejected = client.post(
+            "/api/synthesize",
+            json={"display_name": "香港天文台雷达", "hours": 6},
+        ).json()
+        assert rejected["code"] == 400
+        assert "最高支持 3 小时" in rejected["message"]
 
         first = client.post(
             "/api/synthesize",
@@ -90,5 +99,13 @@ def test_video_label_and_time_range_are_split():
     assert web.video_label(cross_day) == "广州组合反射率"
     assert web.video_time_range(cross_day) == "2026-10-23 23:00  →  2026-10-24 01:00"
 
+    assert web.video_label("HKORadar_20261120_2112_to_2212.mp4") == "香港天文台雷达"
+    assert web.video_time_range("HKORadar_20261120_2112_to_2212.mp4") == "2026-11-20 21:12  →  2026-11-20 22:12"
+
     assert web.video_label("weird.mp4") == "weird.mp4"
     assert web.video_time_range("weird.mp4") == ""
+
+
+def test_hko_is_excluded_from_daily_cron():
+    assert "HKORadar" in web.CRON_EXCLUDED_TYPES
+    assert "HKORadar" in web.all_target_keys

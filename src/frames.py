@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from config import TZ_UTC8
+from config import FRAME_EXTENSIONS, TZ_UTC8
 
 FRAME_TS_FORMAT = "%Y%m%d_%H%M%S"
 
@@ -63,7 +63,7 @@ class FrameCatalog:
         try:
             with os.scandir(date_dir) as entries:
                 for item in entries:
-                    if not item.name.endswith(".png"):
+                    if not item.name.endswith(FRAME_EXTENSIONS):
                         continue
                     ts = parse_frame_timestamp(item.name)
                     if ts is not None:

@@ -57,6 +57,30 @@ RADAR_FETCH_CONCURRENCY = 8       # 单轮雷达抓取并发上限
 RADAR_PENDING_GRACE_MINUTES = 20  # 超过该年龄仍 404 才计入"上游缺失"
 RADAR_MIN_AGE_MINUTES = 6         # 时次至少成熟 6 分钟才探测，避免发布前必然 404
 
+# 允许的帧文件扩展名；HKO 上游是 JPEG，其余信源仍是 PNG
+FRAME_EXTENSIONS = (".png", ".jpg", ".jpeg")
+
+# ==========================================
+# 香港天文台 HKO 雷达图配置
+# ==========================================
+# URL 形如 .../2d256iradar_YYYYMMDDHHMM.jpg，时间为 HKT（UTC+8）。
+# 页面只展示最近约 2 小时，但实测原始 URL 可回取约 4 小时 48 分钟；
+# 回补窗口保守设为 4 小时，避免对已过期时次持续发 404。
+HKO_RADAR_KEY = "HKORadar"
+HKO_RADAR = {
+    "display_name": "香港天文台雷达",
+    "url_template": "https://www.hko.gov.hk/wxinfo/radars/rad_256_png/2d256iradar_{timestamp}.jpg",
+    "file_ext": ".jpg",
+    "interval_minutes": 6,
+    "poll_window_hours": 1,
+    "backfill_hours": 4,
+    "backfill_interval_minutes": RADAR_BACKFILL_INTERVAL_MINUTES,
+    "fetch_concurrency": RADAR_FETCH_CONCURRENCY,
+    "pending_grace_minutes": RADAR_PENDING_GRACE_MINUTES,
+    "min_age_minutes": RADAR_MIN_AGE_MINUTES,
+    "max_synthesis_hours": 3,
+}
+
 # ==========================================
 # 中央气象台卫星云图 (FY4C) 配置
 # ==========================================

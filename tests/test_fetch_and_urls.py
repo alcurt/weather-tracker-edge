@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import TZ_UTC8
 from fetch import SlotProbeCache, is_retryable_status, parse_retry_after, retry_delay
-from poller import build_nmc_url, build_radar_url, slot_is_mature
+from poller import RADAR_SOURCE_SPECS, build_hko_radar_url, build_nmc_url, build_radar_url, slot_is_mature
 
 
 def test_retryable_status_codes():
@@ -41,6 +41,11 @@ def test_nmc_url_converts_beijing_time_to_utc():
 def test_radar_url_uses_beijing_time():
     url = build_radar_url("RadarGZ", datetime(2026, 1, 2, 5, 6, tzinfo=TZ_UTC8))
     assert url == "http://www.tqyb.com.cn/data/swan/mcr/20260102/20260102050600_gz.png"
+
+
+def test_hko_radar_url_uses_hkt_timestamp():
+    url = build_hko_radar_url(datetime(2026, 11, 20, 22, 6, tzinfo=TZ_UTC8))
+    assert url == "https://www.hko.gov.hk/wxinfo/radars/rad_256_png/2d256iradar_202611202206.jpg"
 
 
 def test_utc_conversion_is_timezone_aware():
@@ -104,3 +109,11 @@ def test_probe_cache_success_and_prune_clear_state():
     assert cache.should_probe(key) is False
     cache.prune(set())
     assert cache.should_probe("FY4C:20260101_120000") is True
+
+
+def test_hko_source_uses_jpeg_and_four_hour_backfill():
+    spec = RADAR_SOURCE_SPECS["HKORadar"]
+    assert spec["file_ext"] == ".jpg"
+    assert spec["interval_minutes"] == 6
+    assert spec["backfill_hours"] == 4
+    assert spec["url_kind"] == "hko"
