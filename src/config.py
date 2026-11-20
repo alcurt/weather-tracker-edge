@@ -51,7 +51,7 @@ RADAR_URL_TEMPLATE = "http://www.tqyb.com.cn/data/swan/mcr/{date_str}/{upstream_
 
 RADAR_INTERVAL_MINUTES = 6        # 雷达图固定刷新间隔
 RADAR_POLL_WINDOW_HOURS = 1       # 常规轮询回看窗口（抓取新鲜度）
-RADAR_BACKFILL_HOURS = 6          # 启动/周期缺口回补窗口（上游保留 >=24h）
+RADAR_BACKFILL_HOURS = 20         # 启动/周期缺口回补窗口（上游实测约 24h，留 4h 安全余量）
 RADAR_BACKFILL_INTERVAL_MINUTES = 30  # 缺口回补周期
 RADAR_FETCH_CONCURRENCY = 8       # 单轮雷达抓取并发上限
 RADAR_PENDING_GRACE_MINUTES = 20  # 超过该年龄仍 404 才计入"上游缺失"

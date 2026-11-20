@@ -117,3 +117,8 @@ def test_hko_source_uses_jpeg_and_four_hour_backfill():
     assert spec["interval_minutes"] == 6
     assert spec["backfill_hours"] == 4
     assert spec["url_kind"] == "hko"
+
+
+def test_gz_radar_backfill_window_is_20_hours():
+    assert RADAR_SOURCE_SPECS["RadarGZ"]["backfill_hours"] == 20
+    assert RADAR_SOURCE_SPECS["RadarGD"]["backfill_hours"] == 20

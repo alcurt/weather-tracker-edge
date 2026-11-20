@@ -116,8 +116,8 @@ def test_radar_backfill_only_probes_mature_slots():
 
     assert fetched
     assert max(fetched) <= now - timedelta(minutes=poller_module.RADAR_MIN_AGE_MINUTES)
-    # 6 小时 / 6 分钟 = 60 个成熟时次（当前未成熟时次被排除）
-    assert len(fetched) == 60
+    # 20 小时 / 6 分钟 = 200 个成熟时次（当前未成熟时次被排除）
+    assert len(fetched) == 200
 
 
 def test_radar_loop_tick_runs_without_network(monkeypatch):
