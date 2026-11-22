@@ -33,6 +33,12 @@ def test_lifespan_cancels_daemons_and_shuts_poller_down(monkeypatch):
         options = client.get("/api/options").json()
         assert options["max_hours"]["香港天文台雷达"] == 3
         assert client.get("/api/options").status_code == 200
+        font = client.get("/fonts/GoogleSansFlex.woff2")
+        assert font.status_code == 200
+        assert font.headers["content-type"] == "font/woff2"
+        assert len(font.content) > 100_000
+        assert client.get("/fonts/NotoSansSC-UI.woff2").status_code == 200
+        assert client.get("/fonts/missing.woff2").status_code == 404
         status = client.get("/api/status").json()
         assert "jobs" in status and "queue_size" in status
 

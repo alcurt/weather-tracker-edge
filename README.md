@@ -65,4 +65,8 @@ uv run pytest               # 单元测试；本机有 ffmpeg.exe 时会额外�
 
 ## 协议与授权
 
+## 字体
+
+WebUI 自托管 [Google Sans Flex](https://github.com/googlefonts/googlesans-flex) 与 Noto Sans SC 子集，均为 SIL Open Font License 1.1；字体与许可证位于 [src/static/fonts](src/static/fonts)，不依赖公网字体 CDN。
+
 代码以 [MIT License](LICENSE) 开源；本项目仅作气象数据的边缘采集与计算技术验证，所有气象数据版权归原发布机构所有。

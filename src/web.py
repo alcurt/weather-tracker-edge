@@ -70,6 +70,8 @@ HEALTH_STARTUP_GRACE_SECONDS = 180
 HEALTH_MAX_SILENCE_SECONDS = 600
 
 HTML_TEMPLATE = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+FONT_DIR = Path(__file__).parent / "static" / "fonts"
+FONT_FILES = frozenset({"GoogleSansFlex.woff2", "NotoSansSC-UI.woff2"})
 
 
 def get_dynamic_fps(hours: int) -> float:
@@ -445,6 +447,16 @@ async def lifespan(app: FastAPI):
 def build_app(state: AppState) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.runtime = state
+
+    @app.get("/fonts/{filename}")
+    async def get_font(filename: str):
+        if filename not in FONT_FILES:
+            return HTMLResponse("Not Found", status_code=404)
+        return FileResponse(
+            FONT_DIR / filename,
+            media_type="font/woff2",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     @app.get("/api/status")
     async def get_status():

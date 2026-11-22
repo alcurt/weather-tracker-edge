@@ -42,3 +42,6 @@ AGENTS.md
 # OS junk
 .DS_Store
 Thumbs.db
+
+# 原始字体源文件（网页使用 src/static/fonts 下的 WOFF2）
+sans/

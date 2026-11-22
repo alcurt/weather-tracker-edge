@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>天气追踪边缘节点</title>
+<link rel="preload" href="/fonts/GoogleSansFlex.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/NotoSansSC-UI.woff2" as="font" type="font/woff2" crossorigin>
 <script>
     (function () {
         try {
@@ -18,6 +20,19 @@
     })();
 </script>
 <style>
+    @font-face {
+        font-family: "Google Sans Flex";
+        src: url("/fonts/GoogleSansFlex.woff2") format("woff2");
+        font-weight: 100 900;
+        font-display: swap;
+    }
+    @font-face {
+        font-family: "Noto Sans SC";
+        src: url("/fonts/NotoSansSC-UI.woff2") format("woff2");
+        font-weight: 100 900;
+        font-display: swap;
+        unicode-range: U+2000-206F, U+2190-21FF, U+3000-303F, U+3400-4DBF, U+4E00-9FFF, U+FF00-FFEF;
+    }
     :root {
         color-scheme: light;
         --bg: #F3F6FA;

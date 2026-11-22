@@ -76,7 +76,7 @@
 
 #### 2.5 无头控制面板与虚拟控制台 (WebUI & Virtual Terminal)
 
-* **局域网管理接口**：默认监听于 `http://0.0.0.0:11451`，剥离全部对公网 CDN 的硬依赖，HTML/JS/CSS 为单文件原生实现（零外部字体与脚本）。
+* **局域网管理接口**：默认监听于 `http://0.0.0.0:11451`，剥离全部对公网 CDN 的硬依赖，HTML/JS/CSS 为单文件原生实现，字体以 WOFF2 自托管（零外部字体 CDN 与脚本）。
 * **深浅色主题仪表盘**：支持浅色/深色切换并持久化，整体按 120% 缩放显示；顶部标题栏与运行时钟，合成任务面板横贯顶部，右栏下载统计，中部落盘统计卡片与信源状态表，最底部为文字滚动日志终端。
 * **下载统计可视化**：采集器将每轮结果归类为成功 / 传输失败 / 上游缺失三类，按小时键持久化到 `data/stats/download_hourly.json`（保留 72 小时），前端以近 24 小时堆叠柱状图呈现，悬停柱体显示该小时三类明细。
 * **落盘统计卡片**：每个信源一张紧凑卡片，按信源分配主题色描边，展示 24h 落盘帧数、最新/最早帧时刻、小时覆盖率和等宽 key 徽章。
@@ -177,6 +177,7 @@ GuangzhouWeatherTracker/
 │   ├── download_stats.py          # 下载结果统计（ok/fail/missing）与 JSON 持久化
 │   ├── cleaner.py                 # GC 垃圾清理与过期文件剔除
 │   ├── config.py                  # 信源常量、URL 模板与时区定义
+│   ├── static/fonts/              # 自托管 WOFF2 与 OFL 许可证
 │   └── dashboard.html             # 深浅色 WebUI 单文件前端
 └── data/
     ├── TempB/                     # 静态实况图存储树
@@ -187,7 +188,7 @@ GuangzhouWeatherTracker/
     ├── HKORadar/                  # 香港天文台雷达存储树（JPEG）
     │   ├── .latest_cursor.json
     │   └── 20260716/
-    │        └── 20260716_013600_RadarGZ.png
+    │        └── 20260716_013600_HKORadar.jpg
     ├── FY4C/                      # 中央台风云4C云图存储树
     │   ├── .latest_cursor.json
     │   └── 20260812/
@@ -211,7 +212,7 @@ GuangzhouWeatherTracker/
 * **雷达回补窗口**：常规轮询 1 小时，启动及每 30 分钟扫描缺口；广州/广东最近 20 小时，HKO 最近 4 小时；6 分钟网格，抓取并发上限 8；时次成熟 6 分钟后才探测
 * **发布宽限期**：雷达 20 分钟、FY4C 40 分钟，宽限期内 404 不计入"上游缺失"；雷达时次成熟 6 分钟、FY4C 成熟 10 分钟后才发首个请求
 * **健康检查**：启动宽限 180 秒；首轮/信源 tick 静默阈值 600 秒
-* **WebUI 字体**：`Google Sans Flex` 优先，中文回退 `Noto Sans SC`，再回退系统字体；不引入公网字体 CDN
+* **WebUI 字体**：自托管 `Google Sans Flex` WOFF2 与按 UI 字符集裁剪的 `Noto Sans SC` WOFF2（均 OFL-1.1），中文再回退系统字体；不引入公网字体 CDN
 * **数据时间切片格式**：`%Y%m%d_%H%M%S`
 * **日志轮转**：单文件 10 MB，保留 3 个备份；httpx/httpcore 请求明细降为 WARNING，避免淹没业务日志
 * **视频编码规约**：H.264 / yuv420p / crf 23 / preset fast / `+faststart` / 宏块像素奇偶数向下截断自适应对齐（`-vf scale=trunc(iw/2)*2:trunc(ih/2)*2`）；输出先写 `*.part.mp4`，成功后原子替换，失败自动清理
@@ -280,6 +281,7 @@ WshShell.Run "cmd /c .venv\Scripts\pythonw.exe src\main.py", 0, False
 
 * `src/config.py`、`src/poller.py`、`src/synthesizer.py`、`src/download_stats.py`、`src/cleaner.py`、`src/main.py`、`src/web.py`、`src/logbus.py`、`src/dashboard.html`
 * `src/analytics.py`、`src/frames.py`、`src/grid.py`、`src/jobs.py`、`src/fetch.py`、`src/storage.py`
+* `src/static/fonts/`（GoogleSansFlex.woff2、NotoSansSC-UI.woff2 与两份 OFL 许可证）
 * `README.md`、`PRD.md`
 * `deploy\configure_startup.ps1`、`deploy\install_task.ps1`、`deploy\uninstall_task.ps1`、`deploy\watchdog.ps1`
 * `pyproject.toml`、`uv.lock`（若依赖声明有变动）
